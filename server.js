@@ -447,6 +447,72 @@ const wss = new WebSocket.Server({ server });
 const connections = {};
 const chatListCache = new Map();
 
+// ---------- Второй WebSocket-сервер на порту 8080 (стабильный прокси) ----------
+const wsServer8080 = http.createServer(); // отдельный HTTP-сервер без Express
+const wss8080 = new WebSocket.Server({ server: wsServer8080 });
+
+wss8080.on('connection', (ws) => {
+  let currentUser = null;
+
+  ws.on('message', async (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw); } catch (e) { return; }
+
+    if (msg.type === 'auth') {
+      const user = dbGet('chat_users', msg.login);
+      if (!user) return ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
+      currentUser = msg.login;
+      connections[currentUser] = ws; // используем тот же объект connections
+      user.status = 'online';
+      dbPut('chat_users', msg.login, user);
+      ws.send(JSON.stringify({ type: 'auth_ok', ...user, login: msg.login }));
+      await sendChatList(currentUser);
+      return;
+    }
+
+    if (!currentUser) return;
+
+    // Дальше идёт ТОЧНО ТАКОЙ ЖЕ ОБРАБОТЧИК, как в основном wss
+    try {
+      switch (msg.type) {
+        case 'get_chats': await sendChatList(currentUser); break;
+        case 'get_messages': await handleGetMessages(ws, currentUser, msg.chatId); break;
+        case 'send_message': await handleSendMessage(currentUser, msg.chatId, msg.text, null); break;
+        case 'file_message': await handleSendMessage(currentUser, msg.chatId, msg.text, msg.file); break;
+        case 'edit_message': await handleEditMessage(currentUser, msg.chatId, msg.messageId, msg.newText); break;
+        case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
+        case 'search_user': {
+          const all = dbList('chat_users').filter(u => u !== currentUser && u.toLowerCase().includes((msg.query || '').toLowerCase()));
+          ws.send(JSON.stringify({ type: 'user_search_result', users: all.map(u => ({ login: u })) }));
+          break;
+        }
+        case 'create_private_chat': await createPrivateChat(currentUser, msg.target); break;
+        case 'create_group': await createGroup(currentUser, msg.name); break;
+        case 'create_channel': await createChannel(currentUser, msg.name); break;
+        case 'update_profile': await updateProfile(currentUser, msg, ws); break;
+        case 'join_group': await joinGroup(currentUser, msg.chatId); break;
+        case 'leave_group': await leaveGroup(currentUser, msg.chatId); break;
+        case 'delete_chat': await deleteChat(currentUser, msg.chatId); break;
+        case 'block_chat': await blockChat(currentUser, msg.chatId); break;
+        case 'unblock_chat': await unblockChat(currentUser, msg.chatId); break;
+        case 'call_offer': case 'call_answer': case 'ice_candidate': case 'call_end':
+          await forwardSignaling(msg, currentUser); break;
+        default: ws.send(JSON.stringify({ type: 'error', message: 'Unknown type' }));
+      }
+    } catch (e) { ws.send(JSON.stringify({ type: 'error', message: 'Server error' })); }
+  });
+
+  ws.on('close', () => {
+    if (currentUser) {
+      delete connections[currentUser];
+      const user = dbGet('chat_users', currentUser);
+      if (user) { user.status = 'offline'; dbPut('chat_users', currentUser, user); }
+    }
+  });
+});
+
+wsServer8080.listen(8080, () => console.log('WebSocket proxy running on port 8080'));
+
 wss.on('connection', (ws) => {
   let currentUser = null;
   ws.on('message', async (raw) => {
