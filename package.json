@@ -1,11 +1,10 @@
 {
-  "name": "sky-monolith",
+  "name": "skycitadel-server",
   "version": "1.0.0",
-  "description": "SkyCitadel — единый сервер (SkyID, мессенджер, соцсеть, поиск, файлы, погода, Spotify)",
+  "description": "Монолитный сервер SkyCitadel (мессенджер, соцсеть, поиск, погода, Spotify, файлы, прокси)",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
