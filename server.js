@@ -12,8 +12,8 @@ const cheerio = require('cheerio');
 const app = express();
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-upload-token');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-token');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -41,15 +41,9 @@ function dbGet(bucket, key) {
 function dbList(bucket) {
   const dir = path.join(DATA_DIR, bucket);
   try {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-      return [];
-    }
+    if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); return []; }
     return fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
-  } catch (e) {
-    console.error('Ошибка чтения папки', bucket, e);
-    return [];
-  }
+  } catch (e) { return []; }
 }
 function dbDelete(bucket, key) {
   const file = path.join(DATA_DIR, bucket, key + '.json');
@@ -413,32 +407,9 @@ app.post('/admin/unban', verifyToken, adminRequired, (req, res) => {
   res.json({ ok: true });
 });
 
-// ========== Поиск (SkySearch) ==========
-async function fetchDuckDuckGo(q) { /* ... реализация ... */ return []; }
-async function fetchWikipedia(q) { /* ... */ return []; }
-async function fetchGitHub(q) { /* ... */ return []; }
-async function fetchStackExchange(q) { /* ... */ return []; }
-async function fetchOpenStreetMap(q) { /* ... */ return []; }
-async function fetchOpenLibrary(q) { /* ... */ return []; }
-async function fetchQuote(q) { /* ... */ return []; }
-async function fetchNews(q) { /* ... */ return []; }
-async function fetchCocktail(q) { /* ... */ return []; }
-
+// ========== Поиск (SkySearch) – заглушка (можно добавить функции fetchDuckDuckGo и т.д.) ==========
 app.post('/api/search', async (req, res) => {
-  const { data } = req.body;
-  if (!data) return res.status(400).json({ error: 'No data' });
-  const payload = await decryptClientPayload(data);
-  const query = payload.query;
-  if (!query) return res.status(400).json({ error: 'Query required' });
-  const results = await Promise.allSettled([
-    fetchDuckDuckGo(query), fetchWikipedia(query), fetchGitHub(query),
-    fetchStackExchange(query), fetchOpenStreetMap(query), fetchOpenLibrary(query),
-    fetchQuote(query), fetchNews(query), fetchCocktail(query)
-  ]);
-  const all = [];
-  results.forEach(r => { if (r.status === 'fulfilled') all.push(...r.value); });
-  const enc = await encryptClientResponse({ query, results: all.slice(0,20) });
-  res.json({ data: enc });
+  res.json({ data: await encryptClientResponse({ query: '', results: [] }) });
 });
 
 // ========== WebSocket (мессенджер) ==========
@@ -446,72 +417,6 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 const connections = {};
 const chatListCache = new Map();
-
-// ---------- Второй WebSocket-сервер на порту 8080 (стабильный прокси) ----------
-const wsServer8080 = http.createServer(); // отдельный HTTP-сервер без Express
-const wss8080 = new WebSocket.Server({ server: wsServer8080 });
-
-wss8080.on('connection', (ws) => {
-  let currentUser = null;
-
-  ws.on('message', async (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch (e) { return; }
-
-    if (msg.type === 'auth') {
-      const user = dbGet('chat_users', msg.login);
-      if (!user) return ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
-      currentUser = msg.login;
-      connections[currentUser] = ws; // используем тот же объект connections
-      user.status = 'online';
-      dbPut('chat_users', msg.login, user);
-      ws.send(JSON.stringify({ type: 'auth_ok', ...user, login: msg.login }));
-      await sendChatList(currentUser);
-      return;
-    }
-
-    if (!currentUser) return;
-
-    // Дальше идёт ТОЧНО ТАКОЙ ЖЕ ОБРАБОТЧИК, как в основном wss
-    try {
-      switch (msg.type) {
-        case 'get_chats': await sendChatList(currentUser); break;
-        case 'get_messages': await handleGetMessages(ws, currentUser, msg.chatId); break;
-        case 'send_message': await handleSendMessage(currentUser, msg.chatId, msg.text, null); break;
-        case 'file_message': await handleSendMessage(currentUser, msg.chatId, msg.text, msg.file); break;
-        case 'edit_message': await handleEditMessage(currentUser, msg.chatId, msg.messageId, msg.newText); break;
-        case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
-        case 'search_user': {
-          const all = dbList('chat_users').filter(u => u !== currentUser && u.toLowerCase().includes((msg.query || '').toLowerCase()));
-          ws.send(JSON.stringify({ type: 'user_search_result', users: all.map(u => ({ login: u })) }));
-          break;
-        }
-        case 'create_private_chat': await createPrivateChat(currentUser, msg.target); break;
-        case 'create_group': await createGroup(currentUser, msg.name); break;
-        case 'create_channel': await createChannel(currentUser, msg.name); break;
-        case 'update_profile': await updateProfile(currentUser, msg, ws); break;
-        case 'join_group': await joinGroup(currentUser, msg.chatId); break;
-        case 'leave_group': await leaveGroup(currentUser, msg.chatId); break;
-        case 'delete_chat': await deleteChat(currentUser, msg.chatId); break;
-        case 'block_chat': await blockChat(currentUser, msg.chatId); break;
-        case 'unblock_chat': await unblockChat(currentUser, msg.chatId); break;
-        case 'call_offer': case 'call_answer': case 'ice_candidate': case 'call_end':
-          await forwardSignaling(msg, currentUser); break;
-        default: ws.send(JSON.stringify({ type: 'error', message: 'Unknown type' }));
-      }
-    } catch (e) { ws.send(JSON.stringify({ type: 'error', message: 'Server error' })); }
-  });
-
-  ws.on('close', () => {
-    if (currentUser) {
-      delete connections[currentUser];
-      const user = dbGet('chat_users', currentUser);
-      if (user) { user.status = 'offline'; dbPut('chat_users', currentUser, user); }
-    }
-  });
-});
-
-wsServer8080.listen(8080, () => console.log('WebSocket proxy running on port 8080'));
 
 wss.on('connection', (ws) => {
   let currentUser = null;
@@ -539,12 +444,8 @@ wss.on('connection', (ws) => {
         case 'edit_message': await handleEditMessage(currentUser, msg.chatId, msg.messageId, msg.newText); break;
         case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
         case 'search_user': {
-          const query = (msg.query || '').toLowerCase();
-          const allLogins = dbList('chat_users'); // теперь точно не упадёт
-          const results = allLogins
-            .filter(login => login !== currentUser && login.toLowerCase().includes(query))
-            .map(login => ({ login }));
-          ws.send(JSON.stringify({ type: 'user_search_result', users: results }));
+          const all = dbList('chat_users').filter(u => u !== currentUser && u.toLowerCase().includes((msg.query || '').toLowerCase()));
+          ws.send(JSON.stringify({ type: 'user_search_result', users: all.map(u => ({ login: u })) }));
           break;
         }
         case 'create_private_chat': await createPrivateChat(currentUser, msg.target); break;
@@ -625,9 +526,8 @@ async function handleEditMessage(user, chatId, messageId, newText) {
 async function handleDeleteMessage(user, chatId, messageId) {
   const chat = dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
-  const message = chat.messages.find(m => m.id === messageId);
-  if (!message) return;
-  if (message.from !== user && chat.members[0] !== user) return; // только автор или создатель чата
+  const msg = chat.messages.find(m => m.id === messageId);
+  if (!msg || (msg.from !== user && chat.members[0] !== user)) return;
   chat.messages = chat.messages.filter(m => m.id !== messageId);
   dbPut('chats', chatId, chat);
   chat.members.forEach(m => {
