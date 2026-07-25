@@ -559,10 +559,10 @@ async function handleEditMessage(user, chatId, messageId, newText) {
 async function handleDeleteMessage(user, chatId, messageId) {
   const chat = dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
-  const idx = chat.messages.findIndex(m => m.id === messageId);
-  if (idx === -1) return;
-  if (chat.messages[idx].from !== user && chat.members[0] !== user) return;
-  chat.messages.splice(idx, 1);
+  const message = chat.messages.find(m => m.id === messageId);
+  if (!message) return;
+  if (message.from !== user && chat.members[0] !== user) return; // только автор или создатель чата
+  chat.messages = chat.messages.filter(m => m.id !== messageId);
   dbPut('chats', chatId, chat);
   chat.members.forEach(m => {
     if (connections[m] && !chat.blocked?.includes(m)) {
