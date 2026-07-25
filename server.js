@@ -40,8 +40,16 @@ function dbGet(bucket, key) {
 }
 function dbList(bucket) {
   const dir = path.join(DATA_DIR, bucket);
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      return [];
+    }
+    return fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
+  } catch (e) {
+    console.error('Ошибка чтения папки', bucket, e);
+    return [];
+  }
 }
 function dbDelete(bucket, key) {
   const file = path.join(DATA_DIR, bucket, key + '.json');
@@ -465,8 +473,12 @@ wss.on('connection', (ws) => {
         case 'edit_message': await handleEditMessage(currentUser, msg.chatId, msg.messageId, msg.newText); break;
         case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
         case 'search_user': {
-          const all = dbList('chat_users').filter(u => u !== currentUser && u.toLowerCase().includes((msg.query || '').toLowerCase()));
-          ws.send(JSON.stringify({ type: 'user_search_result', users: all.map(u => ({ login: u })) }));
+          const query = (msg.query || '').toLowerCase();
+          const allLogins = dbList('chat_users'); // теперь точно не упадёт
+          const results = allLogins
+            .filter(login => login !== currentUser && login.toLowerCase().includes(query))
+            .map(login => ({ login }));
+          ws.send(JSON.stringify({ type: 'user_search_result', users: results }));
           break;
         }
         case 'create_private_chat': await createPrivateChat(currentUser, msg.target); break;
