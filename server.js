@@ -18,6 +18,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true })); // <-- ИСПРАВЛЕНИЕ
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_LOGIN = process.env.ADMIN_LOGIN || 'SkyMonder';
@@ -234,7 +235,7 @@ app.get('/oauth/consent', (req, res) => {
     'profile': 'Ваше имя и аватар',
     'email': 'Ваш адрес электронной почты',
     'phone': 'Ваш номер телефона',
-    'social': 'Доступ к публикациям и комментариям во всех сервисах SkyCitadel'
+    'social': 'Доступ к публикациям и комментариям'
   };
   const scopeListHtml = session.scope.map(s => `<li>${scopeDescriptions[s] || s}</li>`).join('');
 
