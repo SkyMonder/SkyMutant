@@ -10,15 +10,17 @@ const multer = require('multer');
 const cheerio = require('cheerio');
 
 const app = express();
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-upload-token');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+
+// ====== CORS (должен быть до всех маршрутов) ======
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-upload-token']
+}));
+app.options('*', cors());
+
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true })); // <-- ИСПРАВЛЕНИЕ
+app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_LOGIN = process.env.ADMIN_LOGIN || 'SkyMonder';
@@ -114,9 +116,9 @@ function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['
     default_scopes: ['profile']
   });
 }
-// Предварительная регистрация клиентов
+// Предварительная регистрация клиентов (SkyVideo, SkySocial)
 registerClient('skyvideo', 'skyvideo_secret', 'SkyVideo',
-  ['https://skyvideo.onrender.com/auth/callback', 'http://localhost:3001/auth/callback', 'https://skycitadel.onrender.com/callback.html'],
+  ['https://skyvideo.onrender.com/auth/callback', 'https://skycitadel.onrender.com/callback.html', 'http://localhost:3001/auth/callback'],
   ['profile', 'email']);
 registerClient('skysocial', 'skysocial_secret', 'SkySocial',
   ['https://skycitadel.onrender.com/socnet.html', 'http://localhost:3000/socnet.html', 'https://skycitadel.onrender.com/callback.html'],
@@ -457,7 +459,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// ========== Чат-регистрация (для мессенджера) ==========
+// ========== Чат-регистрация ==========
 app.post('/chat/register', (req, res) => {
   const { login, salt } = req.body;
   if (!login || !salt) return res.status(400).json({ error: 'login and salt required' });
@@ -623,7 +625,6 @@ app.get('/spotify/get-token', async (req, res) => {
 function verifyToken(req, res, next) {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  // Проверяем по oauth_tokens
   const oauthRec = dbGet('oauth_tokens', auth);
   if (oauthRec) {
     const users = dbList('skyid_users');
@@ -637,7 +638,6 @@ function verifyToken(req, res, next) {
       }
     }
   }
-  // Fallback: старый токен
   const users = dbList('skyid_users');
   for (const login of users) {
     const user = dbGet('skyid_users', login);
