@@ -101,8 +101,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 10*1024*1024 } });
 const uploadTokens = {};
 
-// ========== НОВОЕ: OAuth Клиенты и авторизации ==========
-// Регистрация клиента
+// ========== OAuth Клиенты и авторизации ==========
 function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['profile']) {
   if (dbGet('oauth_clients', clientId)) return;
   dbPut('oauth_clients', clientId, {
@@ -114,30 +113,32 @@ function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['
     default_scopes: ['profile']
   });
 }
-// Предварительная регистрация клиентов (SkyVideo, SkySocial, и т.д.)
-registerClient('skyvideo', 'skyvideo_secret', 'SkyVideo', 
-  ['https://skyvideo.onrender.com/auth/callback', 'http://localhost:3001/auth/callback'], 
+// Предварительная регистрация клиентов
+registerClient('skyvideo', 'skyvideo_secret', 'SkyVideo',
+  ['https://skyvideo.onrender.com/auth/callback', 'http://localhost:3001/auth/callback', 'https://skycitadel.onrender.com/callback.html'],
   ['profile', 'email']);
 registerClient('skysocial', 'skysocial_secret', 'SkySocial',
-  ['https://skycitadel.onrender.com/socnet.html', 'http://localhost:3000/socnet.html'],
+  ['https://skycitadel.onrender.com/socnet.html', 'http://localhost:3000/socnet.html', 'https://skycitadel.onrender.com/callback.html'],
   ['profile', 'social']);
+registerClient('skycitadel', 'skycitadel_secret', 'SkyCitadel',
+  ['https://skycitadel.onrender.com/callback.html', 'http://localhost:3000/callback.html'],
+  ['profile']);
 
-// Временные сессии для OAuth потока
-const authSessions = {}; // sessionId -> { user_skyid, client_id, scope, redirect_uri, state, expires }
+// Временные сессии для OAuth
+const authSessions = {};
 function generateAuthSession(user, clientId, scope, redirectUri, state) {
   const id = crypto.randomBytes(16).toString('hex');
-  authSessions[id] = { 
-    user_skyid: user.skyid, 
-    client_id: clientId, 
-    scope, 
-    redirect_uri: redirectUri, 
-    state, 
-    expires: Date.now() + 600000 
+  authSessions[id] = {
+    user_skyid: user.skyid,
+    client_id: clientId,
+    scope,
+    redirect_uri: redirectUri,
+    state,
+    expires: Date.now() + 600000
   };
   return id;
 }
 
-// pendingAuth (коды) остаётся, но расширяем его содержимым
 const pendingAuth = {}; // code -> { skyid, client_id, scope, redirect_uri, expires }
 
 // ========== Healthix ==========
@@ -155,8 +156,9 @@ app.get('/checkvizit', (req, res) => {
   res.json({ status: 'already_exists', site, date: today });
 });
 
-// ========== OAuth 2.1 Provider (переработанный) ==========
-// GET /oauth/authorize – показывает форму входа или сразу согласие (если уже есть сессия)
+// ========== OAuth 2.1 Provider ==========
+
+// GET /oauth/authorize – форма входа
 app.get('/oauth/authorize', (req, res) => {
   const { client_id, redirect_uri, scope, state } = req.query;
   if (!client_id || !redirect_uri) return res.status(400).send('Missing client_id or redirect_uri');
@@ -165,16 +167,11 @@ app.get('/oauth/authorize', (req, res) => {
   if (!client) return res.status(400).send('Invalid client_id');
   if (!client.redirect_uris.includes(redirect_uri)) return res.status(400).send('Invalid redirect_uri');
 
-  // Разбираем scope
   const requestedScopes = scope ? scope.split(' ') : client.default_scopes;
   const invalidScopes = requestedScopes.filter(s => !client.allowed_scopes.includes(s));
   if (invalidScopes.length) return res.status(400).send('Invalid scope(s): ' + invalidScopes.join(', '));
 
-  // Проверяем, авторизован ли пользователь (по куке сессии). Для простоты пока нет, показываем форму входа.
-  // Можно добавить проверку куки 'skyid_session' -> получить user_skyid и пропустить шаг логина.
-  // Но пока оставляем как есть.
-
-  // Отдаём форму входа с hidden-полями
+  // Отдаём форму входа
   res.send(`
     <!DOCTYPE html>
     <html lang="ru">
@@ -206,7 +203,7 @@ app.get('/oauth/authorize', (req, res) => {
   `);
 });
 
-// POST /oauth/authorize – проверяет логин/пароль, создаёт сессию и перенаправляет на страницу согласия
+// POST /oauth/authorize – проверка логина/пароля, создание сессии
 app.post('/oauth/authorize', async (req, res) => {
   const { login, password, client_id, redirect_uri, scope, state } = req.body;
   if (!login || !password || !client_id || !redirect_uri) return res.status(400).json({ error: 'Missing fields' });
@@ -216,15 +213,10 @@ app.post('/oauth/authorize', async (req, res) => {
   const hash = crypto.pbkdf2Sync(password, user.salt, 100000, 64, 'sha512').toString('hex');
   if (hash !== user.hash) return res.status(401).json({ error: 'Неверный логин или пароль' });
 
-  // Проверяем клиента
   const client = dbGet('oauth_clients', client_id);
   if (!client) return res.status(400).json({ error: 'Invalid client' });
 
-  // Разбираем scope
   const requestedScopes = scope ? scope.split(' ') : client.default_scopes;
-  // (можно дополнительно проверить, что они допустимы)
-
-  // Создаём сессию для согласия
   const sessionId = generateAuthSession(user, client_id, requestedScopes, redirect_uri, state);
   res.redirect(`/oauth/consent?session=${sessionId}`);
 });
@@ -238,7 +230,6 @@ app.get('/oauth/consent', (req, res) => {
   const client = dbGet('oauth_clients', session.client_id);
   if (!client) return res.status(400).send('Клиент не найден');
 
-  // Описания scopes
   const scopeDescriptions = {
     'profile': 'Ваше имя и аватар',
     'email': 'Ваш адрес электронной почты',
@@ -281,7 +272,7 @@ app.get('/oauth/consent', (req, res) => {
   `);
 });
 
-// POST /oauth/consent – обрабатывает решение пользователя
+// POST /oauth/consent – обработка решения пользователя
 app.post('/oauth/consent', (req, res) => {
   const { session: sessionId, action } = req.body;
   const session = authSessions[sessionId];
@@ -292,14 +283,13 @@ app.post('/oauth/consent', (req, res) => {
     return res.redirect(`${session.redirect_uri}?${params.toString()}`);
   }
 
-  // Разрешение – генерируем код
   const code = crypto.randomBytes(16).toString('hex');
   pendingAuth[code] = {
     skyid: session.user_skyid,
     client_id: session.client_id,
     scope: session.scope,
     redirect_uri: session.redirect_uri,
-    expires: Date.now() + 60000 // 1 минута
+    expires: Date.now() + 60000
   };
 
   delete authSessions[sessionId];
@@ -315,7 +305,6 @@ app.post('/oauth/token', async (req, res) => {
 
   const client = dbGet('oauth_clients', client_id);
   if (!client) return res.status(400).json({ error: 'Invalid client' });
-  // (опционально проверка client_secret)
 
   const pending = pendingAuth[code];
   if (!pending || pending.expires < Date.now()) {
@@ -326,9 +315,7 @@ app.post('/oauth/token', async (req, res) => {
     return res.status(400).json({ error: 'Client mismatch' });
   }
 
-  // Генерируем access_token
   const accessToken = crypto.randomBytes(32).toString('hex');
-  // Сохраняем авторизацию в таблицу oauth_tokens
   const authRecord = {
     user_skyid: pending.skyid,
     client_id: client_id,
@@ -343,7 +330,7 @@ app.post('/oauth/token', async (req, res) => {
   res.json({
     access_token: accessToken,
     token_type: 'Bearer',
-    expires_in: 3600, // можно сделать больше
+    expires_in: 3600,
     scope: pending.scope.join(' '),
     skyid: pending.skyid
   });
@@ -357,8 +344,6 @@ app.get('/me', (req, res) => {
   const tokenRecord = dbGet('oauth_tokens', auth);
   if (!tokenRecord) return res.status(401).json({ error: 'Invalid token' });
 
-  // Находим пользователя по skyid
-  // У нас в skyid_users ключом является login, поэтому придётся перебирать
   const users = dbList('skyid_users');
   let user = null;
   for (const login of users) {
@@ -379,11 +364,10 @@ app.get('/me', (req, res) => {
   if (tokenRecord.scope.includes('phone')) {
     result.phone = user.phone || '';
   }
-  // Если scope содержит 'social', можно вернуть дополнительные данные, но пока не нужно
   res.json(result);
 });
 
-// Управление доступом (список авторизаций)
+// Управление доступом
 app.get('/oauth/authorizations', (req, res) => {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
@@ -393,8 +377,7 @@ app.get('/oauth/authorizations', (req, res) => {
   const allTokens = dbList('oauth_tokens');
   const userAuths = allTokens.map(id => dbGet('oauth_tokens', id))
     .filter(rec => rec.user_skyid === tokenRecord.user_skyid);
-  
-  // Группируем по client_id
+
   const result = {};
   userAuths.forEach(rec => {
     if (!result[rec.client_id]) {
@@ -402,7 +385,6 @@ app.get('/oauth/authorizations', (req, res) => {
     }
     result[rec.client_id].scope = [...new Set([...result[rec.client_id].scope, ...rec.scope])];
   });
-  // Добавим имена клиентов
   for (const clientId in result) {
     const client = dbGet('oauth_clients', clientId);
     result[clientId].name = client ? client.name : clientId;
@@ -410,7 +392,6 @@ app.get('/oauth/authorizations', (req, res) => {
   res.json(Object.values(result));
 });
 
-// Отзыв доступа (удаление всех токенов для клиента)
 app.delete('/oauth/authorizations/:client_id', (req, res) => {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
@@ -430,7 +411,7 @@ app.delete('/oauth/authorizations/:client_id', (req, res) => {
   res.json({ ok: true, deleted });
 });
 
-// ========== Старые эндпоинты регистрации/логина (для совместимости с index.html) ==========
+// ========== Старые эндпоинты регистрации/логина (для совместимости) ==========
 app.post('/register', async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ error: 'No data' });
@@ -444,7 +425,6 @@ app.post('/register', async (req, res) => {
     const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
     const token = crypto.randomBytes(32).toString('hex');
     dbPut('skyid_users', login, { skyid, login, salt, hash, token });
-    // Также создаём запись в chat_users для мессенджера (если нужно)
     if (!dbGet('chat_users', login)) {
       dbPut('chat_users', login, { salt, name: login, avatar: '', status: 'online' });
     }
@@ -466,7 +446,6 @@ app.post('/login', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     const hash = crypto.pbkdf2Sync(password, user.salt, 100000, 64, 'sha512').toString('hex');
     if (hash !== user.hash) return res.status(401).json({ error: 'Invalid credentials' });
-    // Обновляем токен (старый становится недействительным)
     const newToken = crypto.randomBytes(32).toString('hex');
     user.token = newToken;
     dbPut('skyid_users', login, user);
@@ -643,7 +622,7 @@ app.get('/spotify/get-token', async (req, res) => {
 function verifyToken(req, res, next) {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  // Сначала проверяем по oauth_tokens (новый механизм)
+  // Проверяем по oauth_tokens
   const oauthRec = dbGet('oauth_tokens', auth);
   if (oauthRec) {
     const users = dbList('skyid_users');
@@ -657,7 +636,7 @@ function verifyToken(req, res, next) {
       }
     }
   }
-  // Fallback: старый токен из skyid_users
+  // Fallback: старый токен
   const users = dbList('skyid_users');
   for (const login of users) {
     const user = dbGet('skyid_users', login);
