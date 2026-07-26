@@ -1,7 +1,7 @@
 {
   "name": "skycitadel-server",
   "version": "1.0.0",
-  "description": "Монолитный сервер SkyCitadel (мессенджер, соцсеть, поиск, погода, Spotify, файлы, прокси)",
+  "description": "Монолитный сервер SkyCitadel (мессенджер, соцсеть, поиск, погода, Spotify, файлы, прокси, OAuth 2.1)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
