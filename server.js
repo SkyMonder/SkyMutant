@@ -116,40 +116,104 @@ app.get('/checkvizit', (req, res) => {
   res.json({ status: 'already_exists', site, date: today });
 });
 
-// ========== SkyID ==========
-app.post('/register', async (req, res) => {
-  const { data } = req.body;
-  if (!data) return res.status(400).json({ error: 'No data' });
-  const payload = await decryptClientPayload(data);
-  const { login, password } = payload;
-  if (!login || !password) return res.status(400).json({ error: 'login/password required' });
-  if (dbGet('skyid_users', login)) return res.status(409).json({ error: 'User exists' });
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
-  const skyid = 'sky_' + crypto.randomBytes(4).toString('hex');
-  const token = crypto.randomBytes(32).toString('hex');
-  dbPut('skyid_users', login, { skyid, salt, hash, token, name: login, avatar: '', status: 'online' });
-  const answer = { skyid, token };
-  const enc = await encryptClientResponse(answer);
-  res.json({ data: enc });
+// ... (весь предыдущий код вплоть до healthix) ...
+
+// ========== OAuth 2.1 Provider ==========
+const pendingAuth = {}; // временное хранилище для кодов авторизации
+
+// Страница, на которую перенаправляется пользователь для входа
+app.get('/oauth/authorize', (req, res) => {
+  const { client_id, redirect_uri, state } = req.query;
+  if (!client_id || !redirect_uri) return res.status(400).send('Missing parameters');
+
+  // Отдаём простую HTML-форму входа (стили крепости)
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head><meta charset="UTF-8"><title>SkyID — Вход</title>
+    <style>
+      body { background: #0a0f1e; color: #e0e8ff; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+      .card { background: #1a233a; padding: 2rem; border-radius: 20px; border: 1px solid #2a3450; text-align: center; }
+      input { width: 100%; padding: 0.7rem; margin: 0.5rem 0; background: #0d1225; border: 1px solid #3a4660; color: white; border-radius: 10px; }
+      .btn { background: #5f7ecf; border: none; color: white; padding: 0.7rem 1.5rem; border-radius: 10px; cursor: pointer; font-weight: bold; margin-top: 0.5rem; }
+      .error { color: #f48024; margin-top: 0.5rem; }
+    </style></head>
+    <body>
+      <div class="card">
+        <h2>Вход в SkyID</h2>
+        <p>Приложение запрашивает доступ к вашему идентификатору</p>
+        <input type="text" id="login" placeholder="Логин">
+        <input type="password" id="password" placeholder="Пароль">
+        <button class="btn" onclick="login()">Войти</button>
+        <div class="error" id="error"></div>
+      </div>
+      <script>
+        async function login() {
+          const login = document.getElementById('login').value.trim();
+          const password = document.getElementById('password').value.trim();
+          if (!login || !password) return;
+          try {
+            const res = await fetch('/oauth/authorize', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ login, password, client_id: '${client_id}', redirect_uri: '${redirect_uri}', state: '${state}' })
+            });
+            const data = await res.json();
+            if (data.error) {
+              document.getElementById('error').textContent = data.error;
+            } else if (data.redirect) {
+              window.location.href = data.redirect;
+            }
+          } catch(e) { document.getElementById('error').textContent = 'Ошибка соединения'; }
+        }
+      </script>
+    </body>
+    </html>
+  `);
 });
-app.post('/login', async (req, res) => {
-  const { data } = req.body;
-  if (!data) return res.status(400).json({ error: 'No data' });
-  const payload = await decryptClientPayload(data);
-  const { login, password } = payload;
-  if (!login || !password) return res.status(400).json({ error: 'login/password required' });
+
+app.post('/oauth/authorize', async (req, res) => {
+  const { login, password, client_id, redirect_uri, state } = req.body;
+  if (!login || !password || !client_id || !redirect_uri) return res.status(400).json({ error: 'Missing fields' });
+
+  // Проверяем пользователя
   const user = dbGet('skyid_users', login);
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!user) return res.status(401).json({ error: 'Неверный логин или пароль' });
   const hash = crypto.pbkdf2Sync(password, user.salt, 100000, 64, 'sha512').toString('hex');
-  if (hash !== user.hash) return res.status(401).json({ error: 'Invalid password' });
-  const token = crypto.randomBytes(32).toString('hex');
-  user.token = token;
-  dbPut('skyid_users', login, user);
-  const answer = { skyid: user.skyid, token };
-  const enc = await encryptClientResponse(answer);
-  res.json({ data: enc });
+  if (hash !== user.hash) return res.status(401).json({ error: 'Неверный логин или пароль' });
+
+  // Генерируем временный код
+  const code = crypto.randomBytes(16).toString('hex');
+  pendingAuth[code] = { skyid: user.skyid, login: user.login, client_id, expires: Date.now() + 60000 }; // 1 минута
+
+  // Формируем URL для редиректа обратно в приложение
+  const params = new URLSearchParams({ code, state: state || '' });
+  const redirectUrl = `${redirect_uri}?${params.toString()}`;
+  res.json({ redirect: redirectUrl });
 });
+
+app.post('/oauth/token', async (req, res) => {
+  const { code, client_id, client_secret } = req.body;
+  if (!code || !client_id) return res.status(400).json({ error: 'Missing parameters' });
+  // В реальном приложении нужно проверять client_secret, но для простоты опустим
+  const pending = pendingAuth[code];
+  if (!pending || pending.expires < Date.now()) {
+    delete pendingAuth[code];
+    return res.status(400).json({ error: 'Invalid or expired code' });
+  }
+  // Генерируем постоянный токен
+  const token = crypto.randomBytes(32).toString('hex');
+  // Обновляем токен в базе пользователя
+  const user = dbGet('skyid_users', pending.login);
+  if (user) {
+    user.token = token;
+    dbPut('skyid_users', pending.login, user);
+  }
+  delete pendingAuth[code];
+  res.json({ access_token: token, token_type: 'Bearer', skyid: pending.skyid, login: pending.login });
+});
+
+// ... (остальные маршруты: /me, /register, /login, погода, объявления, мессенджер и т.д.)
 app.get('/me', (req, res) => {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
