@@ -234,7 +234,7 @@ app.get('/oauth/consent', (req, res) => {
     'profile': 'Ваше имя и аватар',
     'email': 'Ваш адрес электронной почты',
     'phone': 'Ваш номер телефона',
-    'social': 'Доступ к публикациям и комментариям'
+    'social': 'Доступ к публикациям и комментариям во всех сервисах SkyCitadel'
   };
   const scopeListHtml = session.scope.map(s => `<li>${scopeDescriptions[s] || s}</li>`).join('');
 
