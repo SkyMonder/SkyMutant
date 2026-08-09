@@ -126,13 +126,13 @@ function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['
 }
 // Регистрация клиентов
 registerClient('skyvideo', 'skyvideo_secret', 'SkyVideo',
-  ['https://skyvideo.onrender.com/auth/callback', 'https://skycitadel.onrender.com/callback.html', 'http://localhost:3001/auth/callback'],
+  ['https://skyvideo.onrender.com/auth/callback', 'https://skycitadel.onrender.com/callback.html', 'http://localhost:3001/auth/callback', 'https://skycitadel.cc.cd/callback.html'],
   ['profile', 'email']);
 registerClient('skysocial', 'skysocial_secret', 'SkySocial',
-  ['https://skycitadel.onrender.com/socnet.html', 'http://localhost:3000/socnet.html', 'https://skycitadel.onrender.com/callback.html'],
+  ['https://skycitadel.onrender.com/socnet.html', 'http://localhost:3000/socnet.html', 'https://skycitadel.onrender.com/callback.html', 'https://skycitadel.cc.cd/socnet.html'],
   ['profile', 'social']);
 registerClient('skycitadel', 'skycitadel_secret', 'SkyCitadel',
-  ['https://skycitadel.onrender.com/callback.html', 'http://localhost:3000/callback.html'],
+  ['https://skycitadel.onrender.com/callback.html', 'http://localhost:3000/callback.html', 'https://skycitadel.cc.cd/callback.html'],
   ['profile']);
 
 // Временные сессии для OAuth
