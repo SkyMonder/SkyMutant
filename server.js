@@ -122,8 +122,7 @@ registerClient('skyvideo', 'skyvideo_secret', 'SkyVideo',
   [
     'https://skyvideo.onrender.com/auth/callback',
     'https://skycitadel.onrender.com/callback.html',
-    'https://skycitadel.cc.cd/callback.html',
-    'http://localhost:3001/auth/callback'
+    'https://skycitadel.cc.cd/callback.html'
   ],
   ['profile', 'email']
 );
@@ -132,11 +131,10 @@ registerClient('skysocial', 'skysocial_secret', 'SkySocial',
   [
     'https://skycitadel.onrender.com/socnet.html',
     'https://skycitadel.cc.cd/socnet.html',
-    'https://skycitadel.cc.cd/callback.html'
+    'https://skycitadel.cc.cd/callback_social.html'
   ],
   ['profile', 'social']
 );
-
 // (можно зарегистрировать и другие клиенты, если нужны)
 
 // Временные сессии для OAuth
