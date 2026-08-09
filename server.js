@@ -11,7 +11,7 @@ const cheerio = require('cheerio');
 
 const app = express();
 
-// ====== CORS ======
+// ====== CORS (разрешён для всех) ======
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -22,29 +22,19 @@ app.options('*', cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ====== Глобальные обработчики ошибок ======
-process.on('uncaughtException', (err) => {
-  console.error('💥 Uncaught Exception:', err.message);
-  console.error(err.stack);
-});
-process.on('unhandledRejection', (err) => {
-  console.error('💥 Unhandled Rejection:', err.message);
-  console.error(err.stack);
-});
-
 const PORT = process.env.PORT || 3000;
 const ADMIN_LOGIN = process.env.ADMIN_LOGIN || 'SkyMonder';
 const CLIENT_SECRET = "BLx5Vp7U1c8dR2mQkG4fJ6yA9tC3bF0zH7iL2nM5oP8=";
 const CLIENT_KEY = Buffer.from(CLIENT_SECRET, 'base64');
 let STORAGE_KEY = Buffer.from(process.env.STORAGE_KEY_HEX || crypto.randomBytes(32).toString('hex'), 'hex');
 
-// ====== Файловая БД ======
+// ---------- Файловая БД ----------
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 function dbPut(bucket, key, data) {
   const dir = path.join(DATA_DIR, bucket);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, key + '.json'), JSON.stringify(data, null, 2));
+  fs.writeFileSync(path.join(dir, key + '.json'), JSON.stringify(data));
 }
 function dbGet(bucket, key) {
   const file = path.join(DATA_DIR, bucket, key + '.json');
@@ -53,15 +43,17 @@ function dbGet(bucket, key) {
 }
 function dbList(bucket) {
   const dir = path.join(DATA_DIR, bucket);
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
+  try {
+    if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); return []; }
+    return fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
+  } catch (e) { return []; }
 }
 function dbDelete(bucket, key) {
   const file = path.join(DATA_DIR, bucket, key + '.json');
   if (fs.existsSync(file)) fs.unlinkSync(file);
 }
 
-// ====== Шифрование ======
+// ---------- Шифрование ----------
 function encryptForStorage(plaintext) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', STORAGE_KEY, iv);
@@ -102,7 +94,7 @@ async function encryptClientResponse(plainObj) {
   return combined.toString('base64');
 }
 
-// ====== Загрузка файлов ======
+// ---------- Загрузка файлов ----------
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 const storage = multer.diskStorage({
@@ -112,7 +104,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 10*1024*1024 } });
 const uploadTokens = {};
 
-// ========== OAuth Клиенты и авторизации ==========
+// ========== OAuth Клиенты ==========
 function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['profile']) {
   if (dbGet('oauth_clients', clientId)) return;
   dbPut('oauth_clients', clientId, {
@@ -124,16 +116,28 @@ function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['
     default_scopes: ['profile']
   });
 }
-// Регистрация клиентов
+
+// Регистрация клиентов (обновлённые redirect_uri)
 registerClient('skyvideo', 'skyvideo_secret', 'SkyVideo',
-  ['https://skyvideo.onrender.com/auth/callback', 'https://skycitadel.onrender.com/callback.html', 'http://localhost:3001/auth/callback', 'https://skycitadel.cc.cd/callback.html'],
-  ['profile', 'email']);
+  [
+    'https://skyvideo.onrender.com/auth/callback',
+    'https://skycitadel.onrender.com/callback.html',
+    'https://skycitadel.cc.cd/callback.html',
+    'http://localhost:3001/auth/callback'
+  ],
+  ['profile', 'email']
+);
+
 registerClient('skysocial', 'skysocial_secret', 'SkySocial',
-  ['https://skycitadel.onrender.com/socnet.html', 'http://localhost:3000/socnet.html', 'https://skycitadel.onrender.com/callback.html', 'https://skycitadel.cc.cd/socnet.html'],
-  ['profile', 'social']);
-registerClient('skycitadel', 'skycitadel_secret', 'SkyCitadel',
-  ['https://skycitadel.onrender.com/callback.html', 'http://localhost:3000/callback.html', 'https://skycitadel.cc.cd/callback.html'],
-  ['profile']);
+  [
+    'https://skycitadel.onrender.com/socnet.html',
+    'https://skycitadel.cc.cd/socnet.html',
+    'https://skycitadel.cc.cd/callback.html'
+  ],
+  ['profile', 'social']
+);
+
+// (можно зарегистрировать и другие клиенты, если нужны)
 
 // Временные сессии для OAuth
 const authSessions = {};
@@ -149,13 +153,14 @@ function generateAuthSession(user, clientId, scope, redirectUri, state) {
   };
   return id;
 }
-const pendingAuth = {};
 
-// ========== Health ==========
+const pendingAuth = {}; // code -> { skyid, client_id, scope, redirect_uri, expires }
+
+// ========== Healthix ==========
 app.get('/healthix', (req, res) => res.json({ status: 'ok' }));
 
 // ========== SkyCounter ==========
-const SITES = ['skycitadel.onrender.com'];
+const SITES = ['skycitadel.onrender.com', 'skycitadel.cc.cd'];
 app.get('/checkvizit', (req, res) => {
   const site = req.query.site;
   if (!site) return res.status(400).json({ error: 'Missing site' });
@@ -167,6 +172,8 @@ app.get('/checkvizit', (req, res) => {
 });
 
 // ========== OAuth 2.1 Provider ==========
+
+// GET /oauth/authorize – форма входа
 app.get('/oauth/authorize', (req, res) => {
   const { client_id, redirect_uri, scope, state } = req.query;
   if (!client_id || !redirect_uri) return res.status(400).send('Missing client_id or redirect_uri');
@@ -179,6 +186,7 @@ app.get('/oauth/authorize', (req, res) => {
   const invalidScopes = requestedScopes.filter(s => !client.allowed_scopes.includes(s));
   if (invalidScopes.length) return res.status(400).send('Invalid scope(s): ' + invalidScopes.join(', '));
 
+  // Отдаём форму входа
   res.send(`
     <!DOCTYPE html>
     <html lang="ru">
@@ -188,6 +196,7 @@ app.get('/oauth/authorize', (req, res) => {
       .card { background: #1a233a; padding: 2rem; border-radius: 20px; border: 1px solid #2a3450; text-align: center; }
       input { width: 100%; padding: 0.7rem; margin: 0.5rem 0; background: #0d1225; border: 1px solid #3a4660; color: white; border-radius: 10px; }
       .btn { background: #5f7ecf; border: none; color: white; padding: 0.7rem 1.5rem; border-radius: 10px; cursor: pointer; font-weight: bold; margin-top: 0.5rem; }
+      .error { color: #f48024; margin-top: 0.5rem; }
     </style></head>
     <body>
       <div class="card">
@@ -202,12 +211,14 @@ app.get('/oauth/authorize', (req, res) => {
           <input type="password" name="password" placeholder="Пароль" required>
           <button type="submit" class="btn">Войти</button>
         </form>
+        <div class="error" id="error"></div>
       </div>
     </body>
     </html>
   `);
 });
 
+// POST /oauth/authorize – проверка логина/пароля, создание сессии
 app.post('/oauth/authorize', async (req, res) => {
   const { login, password, client_id, redirect_uri, scope, state } = req.body;
   if (!login || !password || !client_id || !redirect_uri) return res.status(400).json({ error: 'Missing fields' });
@@ -225,6 +236,7 @@ app.post('/oauth/authorize', async (req, res) => {
   res.redirect(`/oauth/consent?session=${sessionId}`);
 });
 
+// GET /oauth/consent – страница согласия
 app.get('/oauth/consent', (req, res) => {
   const sessionId = req.query.session;
   const session = authSessions[sessionId];
@@ -252,6 +264,7 @@ app.get('/oauth/consent', (req, res) => {
       ul { list-style: none; padding: 0; }
       li { padding: 0.5rem; border-bottom: 1px solid #2a3450; }
       .btn-row { display: flex; gap: 1rem; justify-content: center; margin-top: 1.5rem; }
+      .btn { padding: 0.7rem 2rem; border: none; border-radius: 10px; cursor: pointer; font-weight: bold; }
       .allow { background: #5f7ecf; color: white; }
       .deny { background: #6b4c4c; color: white; }
     </style>
@@ -264,8 +277,8 @@ app.get('/oauth/consent', (req, res) => {
         <form action="/oauth/consent" method="POST">
           <input type="hidden" name="session" value="${sessionId}">
           <div class="btn-row">
-            <button type="submit" name="action" value="allow" class="allow">Разрешить</button>
-            <button type="submit" name="action" value="deny" class="deny">Отказать</button>
+            <button type="submit" name="action" value="allow" class="btn allow">Разрешить</button>
+            <button type="submit" name="action" value="deny" class="btn deny">Отказать</button>
           </div>
         </form>
       </div>
@@ -274,6 +287,7 @@ app.get('/oauth/consent', (req, res) => {
   `);
 });
 
+// POST /oauth/consent – обработка решения пользователя
 app.post('/oauth/consent', (req, res) => {
   const { session: sessionId, action } = req.body;
   const session = authSessions[sessionId];
@@ -292,18 +306,25 @@ app.post('/oauth/consent', (req, res) => {
     redirect_uri: session.redirect_uri,
     expires: Date.now() + 60000
   };
+
   delete authSessions[sessionId];
 
   const params = new URLSearchParams({ code, state: session.state || '' });
   res.redirect(`${session.redirect_uri}?${params.toString()}`);
 });
 
+// POST /oauth/token – обмен кода на токен
 app.post('/oauth/token', async (req, res) => {
-  const { code, client_id, client_secret } = req.body;
+  const { code, client_id, client_secret, redirect_uri } = req.body;
   if (!code || !client_id) return res.status(400).json({ error: 'Missing parameters' });
 
   const client = dbGet('oauth_clients', client_id);
   if (!client) return res.status(400).json({ error: 'Invalid client' });
+
+  // Проверяем redirect_uri, если передан
+  if (redirect_uri && !client.redirect_uris.includes(redirect_uri)) {
+    return res.status(400).json({ error: 'Invalid redirect_uri' });
+  }
 
   const pending = pendingAuth[code];
   if (!pending || pending.expires < Date.now()) {
@@ -335,6 +356,7 @@ app.post('/oauth/token', async (req, res) => {
   });
 });
 
+// GET /me – возвращает данные в зависимости от scope токена
 app.get('/me', (req, res) => {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
@@ -365,6 +387,7 @@ app.get('/me', (req, res) => {
   res.json(result);
 });
 
+// Управление доступом
 app.get('/oauth/authorizations', (req, res) => {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
@@ -408,7 +431,7 @@ app.delete('/oauth/authorizations/:client_id', (req, res) => {
   res.json({ ok: true, deleted });
 });
 
-// ========== Регистрация / Логин (старые эндпоинты) ==========
+// ========== Старые эндпоинты регистрации/логина (для совместимости) ==========
 app.post('/register', async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ error: 'No data' });
@@ -453,7 +476,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// ========== Чат ==========
+// ========== Чат-регистрация ==========
 app.post('/chat/register', (req, res) => {
   const { login, salt } = req.body;
   if (!login || !salt) return res.status(400).json({ error: 'login and salt required' });
@@ -717,7 +740,7 @@ app.post('/admin/unban', verifyToken, adminRequired, (req, res) => {
   res.json({ ok: true });
 });
 
-// ========== SkySearch (заглушка) ==========
+// ========== Поиск (SkySearch) – заглушка ==========
 app.post('/api/search', async (req, res) => {
   res.json({ data: await encryptClientResponse({ query: '', results: [] }) });
 });
