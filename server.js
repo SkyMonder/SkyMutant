@@ -8,14 +8,11 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const cheerio = require('cheerio');
-const NodeCache = require('node-cache');
-const userCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
-const clientCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
-const tokenCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
+const NodeCache = require('node-cache'); // <-- ДОБАВЛЕНО
 
 const app = express();
 
-// ====== CORS (разрешён для всех) ======
+// ====== CORS ======
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -108,6 +105,57 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 10*1024*1024 } });
 const uploadTokens = {};
 
+// ========== КЕШИРОВАНИЕ ==========
+const userCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
+const clientCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
+const tokenCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
+const announcementCache = { data: null, time: 0 };
+
+// Кешированные функции доступа
+function getCachedUser(login) {
+  let user = userCache.get(login);
+  if (!user) {
+    user = dbGet('skyid_users', login);
+    if (user) userCache.set(login, user);
+  }
+  return user;
+}
+function getCachedClient(clientId) {
+  let client = clientCache.get(clientId);
+  if (!client) {
+    client = dbGet('oauth_clients', clientId);
+    if (client) clientCache.set(clientId, client);
+  }
+  return client;
+}
+function getCachedToken(token) {
+  let record = tokenCache.get(token);
+  if (!record) {
+    record = dbGet('oauth_tokens', token);
+    if (record) tokenCache.set(token, record);
+  }
+  return record;
+}
+
+// Индекс skyid -> login
+let skyidIndex = null;
+function buildSkyidIndex() {
+  if (skyidIndex) return skyidIndex;
+  skyidIndex = new Map();
+  const logins = dbList('skyid_users');
+  for (const login of logins) {
+    const user = getCachedUser(login);
+    if (user) skyidIndex.set(user.skyid, login);
+  }
+  return skyidIndex;
+}
+function getUserBySkyid(skyid) {
+  const index = buildSkyidIndex();
+  const login = index.get(skyid);
+  if (login) return getCachedUser(login);
+  return null;
+}
+
 // ========== OAuth Клиенты ==========
 function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['profile']) {
   if (dbGet('oauth_clients', clientId)) return;
@@ -121,7 +169,6 @@ function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['
   });
 }
 
-// Регистрация клиентов (обновлённые redirect_uri)
 registerClient('skyvideo', 'skyvideo_secret', 'SkyVideo',
   [
     'https://skyvideo.onrender.com/auth/callback',
@@ -139,9 +186,7 @@ registerClient('skysocial', 'skysocial_secret', 'SkySocial',
   ],
   ['profile', 'social']
 );
-// (можно зарегистрировать и другие клиенты, если нужны)
 
-// Временные сессии для OAuth
 const authSessions = {};
 function generateAuthSession(user, clientId, scope, redirectUri, state) {
   const id = crypto.randomBytes(16).toString('hex');
@@ -158,7 +203,7 @@ function generateAuthSession(user, clientId, scope, redirectUri, state) {
 
 const pendingAuth = {}; // code -> { skyid, client_id, scope, redirect_uri, expires }
 
-// ========== Healthix ==========
+// ========== Health ==========
 app.get('/healthix', (req, res) => res.json({ status: 'ok' }));
 
 // ========== SkyCounter ==========
@@ -175,22 +220,17 @@ app.get('/checkvizit', (req, res) => {
 
 // ========== OAuth 2.1 Provider ==========
 
-// GET /oauth/authorize – форма входа
 app.get('/oauth/authorize', (req, res) => {
   const { client_id, redirect_uri, scope, state } = req.query;
   if (!client_id || !redirect_uri) return res.status(400).send('Missing client_id or redirect_uri');
-
-  const client = dbGet('oauth_clients', client_id);
+  const client = getCachedClient(client_id);
   if (!client) return res.status(400).send('Invalid client_id');
   if (!client.redirect_uris.includes(redirect_uri)) return res.status(400).send('Invalid redirect_uri');
-
   const requestedScopes = scope ? scope.split(' ') : client.default_scopes;
   const invalidScopes = requestedScopes.filter(s => !client.allowed_scopes.includes(s));
   if (invalidScopes.length) return res.status(400).send('Invalid scope(s): ' + invalidScopes.join(', '));
 
-  // Отдаём форму входа
-  res.send(`
-    <!DOCTYPE html>
+  res.send(`<!DOCTYPE html>
     <html lang="ru">
     <head><meta charset="UTF-8"><title>SkyID — Вход</title>
     <style>
@@ -220,51 +260,29 @@ app.get('/oauth/authorize', (req, res) => {
   `);
 });
 
-// POST /oauth/authorize – проверка логина/пароля, создание сессии
 app.post('/oauth/authorize', async (req, res) => {
   const { login, password, client_id, redirect_uri, scope, state } = req.body;
   if (!login || !password || !client_id || !redirect_uri) return res.status(400).json({ error: 'Missing fields' });
 
-  // Вместо dbGet('skyid_users', login) используйте:
-  function getCachedUser(login) {
-    let user = userCache.get(login);
-    if (!user) {
-      user = dbGet('skyid_users', login);
-    if (user) userCache.set(login, user);
-    }
-    return user;
-  }
+  const user = getCachedUser(login);
+  if (!user) return res.status(401).json({ error: 'Неверный логин или пароль' });
+  const hash = crypto.pbkdf2Sync(password, user.salt, 50000, 64, 'sha512').toString('hex'); // уменьшено
+  if (hash !== user.hash) return res.status(401).json({ error: 'Неверный логин или пароль' });
 
-// Вместо dbGet('oauth_clients', clientId) используйте:
-  function getCachedClient(clientId) {
-    let client = clientCache.get(clientId);
-    if (!client) {
-      client = dbGet('oauth_clients', clientId);
-      if (client) clientCache.set(clientId, client);
-    }
-    return client;
-  }
+  const client = getCachedClient(client_id);
+  if (!client) return res.status(400).json({ error: 'Invalid client' });
 
-  // Вместо dbGet('oauth_tokens', token) используйте:
-  function getCachedToken(token) {
-    let record = tokenCache.get(token);
-    if (!record) {
-      record = dbGet('oauth_tokens', token);
-      if (record) tokenCache.set(token, record);
-    }
-    return record;
-  }
+  const requestedScopes = scope ? scope.split(' ') : client.default_scopes;
+  const sessionId = generateAuthSession(user, client_id, requestedScopes, redirect_uri, state);
+  res.redirect(`/oauth/consent?session=${sessionId}`);
 });
 
-// GET /oauth/consent – страница согласия
 app.get('/oauth/consent', (req, res) => {
   const sessionId = req.query.session;
   const session = authSessions[sessionId];
-  if (!session || session.expires < Date.now()) return res.status(400).send('Сессия истекла или недействительна');
-
-  const client = dbGet('oauth_clients', session.client_id);
+  if (!session || session.expires < Date.now()) return res.status(400).send('Сессия истекла');
+  const client = getCachedClient(session.client_id);
   if (!client) return res.status(400).send('Клиент не найден');
-
   const scopeDescriptions = {
     'profile': 'Ваше имя и аватар',
     'email': 'Ваш адрес электронной почты',
@@ -272,9 +290,7 @@ app.get('/oauth/consent', (req, res) => {
     'social': 'Доступ к публикациям и комментариям'
   };
   const scopeListHtml = session.scope.map(s => `<li>${scopeDescriptions[s] || s}</li>`).join('');
-
-  res.send(`
-    <!DOCTYPE html>
+  res.send(`<!DOCTYPE html>
     <html lang="ru">
     <head><meta charset="UTF-8"><title>Запрос доступа</title>
     <style>
@@ -307,17 +323,14 @@ app.get('/oauth/consent', (req, res) => {
   `);
 });
 
-// POST /oauth/consent – обработка решения пользователя
 app.post('/oauth/consent', (req, res) => {
   const { session: sessionId, action } = req.body;
   const session = authSessions[sessionId];
   if (!session || session.expires < Date.now()) return res.status(400).send('Сессия истекла');
-
   if (action === 'deny') {
     const params = new URLSearchParams({ error: 'access_denied', state: session.state || '' });
     return res.redirect(`${session.redirect_uri}?${params.toString()}`);
   }
-
   const code = crypto.randomBytes(16).toString('hex');
   pendingAuth[code] = {
     skyid: session.user_skyid,
@@ -326,26 +339,19 @@ app.post('/oauth/consent', (req, res) => {
     redirect_uri: session.redirect_uri,
     expires: Date.now() + 60000
   };
-
   delete authSessions[sessionId];
-
   const params = new URLSearchParams({ code, state: session.state || '' });
   res.redirect(`${session.redirect_uri}?${params.toString()}`);
 });
 
-// POST /oauth/token – обмен кода на токен
 app.post('/oauth/token', async (req, res) => {
   const { code, client_id, client_secret, redirect_uri } = req.body;
   if (!code || !client_id) return res.status(400).json({ error: 'Missing parameters' });
-
-  const client = dbGet('oauth_clients', client_id);
+  const client = getCachedClient(client_id);
   if (!client) return res.status(400).json({ error: 'Invalid client' });
-
-  // Проверяем redirect_uri, если передан
   if (redirect_uri && !client.redirect_uris.includes(redirect_uri)) {
     return res.status(400).json({ error: 'Invalid redirect_uri' });
   }
-
   const pending = pendingAuth[code];
   if (!pending || pending.expires < Date.now()) {
     delete pendingAuth[code];
@@ -364,9 +370,9 @@ app.post('/oauth/token', async (req, res) => {
     created_at: Date.now()
   };
   dbPut('oauth_tokens', accessToken, authRecord);
+  tokenCache.set(accessToken, authRecord); // кешируем сразу
 
   delete pendingAuth[code];
-
   res.json({
     access_token: accessToken,
     token_type: 'Bearer',
@@ -376,20 +382,14 @@ app.post('/oauth/token', async (req, res) => {
   });
 });
 
-// GET /me – возвращает данные в зависимости от scope токена
 app.get('/me', (req, res) => {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
 
-  const tokenRecord = dbGet('oauth_tokens', auth);
+  const tokenRecord = getCachedToken(auth);
   if (!tokenRecord) return res.status(401).json({ error: 'Invalid token' });
 
-  const users = dbList('skyid_users');
-  let user = null;
-  for (const login of users) {
-    const u = dbGet('skyid_users', login);
-    if (u && u.skyid === tokenRecord.user_skyid) { user = u; break; }
-  }
+  const user = getUserBySkyid(tokenRecord.user_skyid);
   if (!user) return res.status(401).json({ error: 'User not found' });
 
   const result = { skyid: user.skyid };
@@ -407,11 +407,10 @@ app.get('/me', (req, res) => {
   res.json(result);
 });
 
-// Управление доступом
 app.get('/oauth/authorizations', (req, res) => {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const tokenRecord = dbGet('oauth_tokens', auth);
+  const tokenRecord = getCachedToken(auth);
   if (!tokenRecord) return res.status(401).json({ error: 'Invalid token' });
 
   const allTokens = dbList('oauth_tokens');
@@ -426,7 +425,7 @@ app.get('/oauth/authorizations', (req, res) => {
     result[rec.client_id].scope = [...new Set([...result[rec.client_id].scope, ...rec.scope])];
   });
   for (const clientId in result) {
-    const client = dbGet('oauth_clients', clientId);
+    const client = getCachedClient(clientId);
     result[clientId].name = client ? client.name : clientId;
   }
   res.json(Object.values(result));
@@ -435,7 +434,7 @@ app.get('/oauth/authorizations', (req, res) => {
 app.delete('/oauth/authorizations/:client_id', (req, res) => {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const tokenRecord = dbGet('oauth_tokens', auth);
+  const tokenRecord = getCachedToken(auth);
   if (!tokenRecord) return res.status(401).json({ error: 'Invalid token' });
 
   const clientId = req.params.client_id;
@@ -445,13 +444,14 @@ app.delete('/oauth/authorizations/:client_id', (req, res) => {
     const rec = dbGet('oauth_tokens', id);
     if (rec.user_skyid === tokenRecord.user_skyid && rec.client_id === clientId) {
       dbDelete('oauth_tokens', id);
+      tokenCache.del(id);
       deleted++;
     }
   }
   res.json({ ok: true, deleted });
 });
 
-// ========== Старые эндпоинты регистрации/логина (для совместимости) ==========
+// ========== Старые эндпоинты регистрации/логина (с кешированием) ==========
 app.post('/register', async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ error: 'No data' });
@@ -459,12 +459,15 @@ app.post('/register', async (req, res) => {
     const payload = await decryptClientPayload(data);
     const { login, password } = payload;
     if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
-    if (dbGet('skyid_users', login)) return res.status(409).json({ error: 'User exists' });
+    if (getCachedUser(login)) return res.status(409).json({ error: 'User exists' });
     const salt = crypto.randomBytes(16).toString('base64');
-    const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+    const hash = crypto.pbkdf2Sync(password, salt, 50000, 64, 'sha512').toString('hex');
     const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
     const token = crypto.randomBytes(32).toString('hex');
     dbPut('skyid_users', login, { skyid, login, salt, hash, token });
+    userCache.set(login, { skyid, login, salt, hash, token });
+    // Обновляем индекс
+    if (skyidIndex) skyidIndex.set(skyid, login);
     if (!dbGet('chat_users', login)) {
       dbPut('chat_users', login, { salt, name: login, avatar: '', status: 'online' });
     }
@@ -482,13 +485,14 @@ app.post('/login', async (req, res) => {
     const payload = await decryptClientPayload(data);
     const { login, password } = payload;
     if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
-    const user = dbGet('skyid_users', login);
+    const user = getCachedUser(login);
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-    const hash = crypto.pbkdf2Sync(password, user.salt, 100000, 64, 'sha512').toString('hex');
+    const hash = crypto.pbkdf2Sync(password, user.salt, 50000, 64, 'sha512').toString('hex');
     if (hash !== user.hash) return res.status(401).json({ error: 'Invalid credentials' });
     const newToken = crypto.randomBytes(32).toString('hex');
     user.token = newToken;
     dbPut('skyid_users', login, user);
+    userCache.set(login, user);
     const enc = await encryptClientResponse({ skyid: user.skyid, token: newToken });
     res.json({ data: enc });
   } catch (e) {
@@ -526,18 +530,16 @@ app.post('/api/weather', async (req, res) => {
   res.json({ data: enc });
 });
 
-// ========== Объявления ==========
-let announcementCache = null;
-let announcementCacheTime = 0;
-
+// ========== Объявления (с кешированием) ==========
+let announcementCache = { data: null, time: 0 };
 app.get('/announcements', async (req, res) => {
-  if (Date.now() - announcementCacheTime < 60000 && announcementCache) {
-    return res.json({ data: await encryptClientResponse(announcementCache) });
+  if (Date.now() - announcementCache.time < 60000 && announcementCache.data) {
+    return res.json({ data: await encryptClientResponse(announcementCache.data) });
   }
   const keys = dbList('announcements');
   const list = keys.map(k => dbGet('announcements', k)).filter(Boolean).sort((a,b) => b.created - a.created);
-  announcementCache = list;
-  announcementCacheTime = Date.now();
+  announcementCache.data = list;
+  announcementCache.time = Date.now();
   const enc = await encryptClientResponse(list);
   res.json({ data: enc });
 });
@@ -552,12 +554,15 @@ app.post('/announcements', async (req, res) => {
   const users = dbList('skyid_users');
   let isAdmin = false;
   for (const login of users) {
-    const u = dbGet('skyid_users', login);
+    const u = getCachedUser(login);
     if (u && u.token === auth && u.login === ADMIN_LOGIN) { isAdmin = true; break; }
   }
   if (!isAdmin) return res.status(403).json({ error: 'Forbidden' });
   const ann = { id: 'ann_' + Date.now(), text, created: Date.now() };
   dbPut('announcements', ann.id, ann);
+  // Инвалидируем кеш
+  announcementCache.data = null;
+  announcementCache.time = 0;
   const enc = await encryptClientResponse({ ok: true });
   res.json({ data: enc });
 });
@@ -645,7 +650,7 @@ app.post('/spotify/save-token', async (req, res) => {
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
   const users = dbList('skyid_users');
   let login;
-  for (const l of users) { const u = dbGet('skyid_users', l); if (u && u.token === auth) { login = l; break; } }
+  for (const l of users) { const u = getCachedUser(l); if (u && u.token === auth) { login = l; break; } }
   if (!login) return res.status(401).json({ error: 'Invalid user' });
   const { spotify_token, spotify_refresh, expires_at } = req.body;
   if (!spotify_token) return res.status(400).json({ error: 'Missing token' });
@@ -658,7 +663,7 @@ app.get('/spotify/get-token', async (req, res) => {
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
   const users = dbList('skyid_users');
   let login;
-  for (const l of users) { const u = dbGet('skyid_users', l); if (u && u.token === auth) { login = l; break; } }
+  for (const l of users) { const u = getCachedUser(l); if (u && u.token === auth) { login = l; break; } }
   if (!login) return res.status(401).json({ error: 'Invalid user' });
   const encObj = dbGet('spotify_tokens', login);
   if (!encObj) return res.json({ token: null });
@@ -670,22 +675,20 @@ app.get('/spotify/get-token', async (req, res) => {
 function verifyToken(req, res, next) {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const oauthRec = dbGet('oauth_tokens', auth);
+  const oauthRec = getCachedToken(auth);
   if (oauthRec) {
-    const users = dbList('skyid_users');
-    for (const login of users) {
-      const u = dbGet('skyid_users', login);
-      if (u && u.skyid === oauthRec.user_skyid) {
-        req.skyid = u.skyid;
-        req.login = u.login;
-        req.isAdmin = (u.login === ADMIN_LOGIN);
-        return next();
-      }
+    const user = getUserBySkyid(oauthRec.user_skyid);
+    if (user) {
+      req.skyid = user.skyid;
+      req.login = user.login;
+      req.isAdmin = (user.login === ADMIN_LOGIN);
+      return next();
     }
   }
+  // fallback старый токен
   const users = dbList('skyid_users');
   for (const login of users) {
-    const user = dbGet('skyid_users', login);
+    const user = getCachedUser(login);
     if (user && user.token === auth) {
       req.skyid = user.skyid;
       req.login = user.login;
