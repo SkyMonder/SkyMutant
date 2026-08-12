@@ -14,20 +14,18 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 
-// ====== Увеличение таймаутов ======
+// ====== Таймауты и логирование ======
 app.use((req, res, next) => {
   req.setTimeout(120000);
   res.setTimeout(120000);
   next();
 });
 
-// ====== Логирование времени ======
 app.use((req, res, next) => {
   const start = Date.now();
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} started`);
   res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} finished in ${duration}ms`);
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} finished in ${Date.now() - start}ms`);
   });
   next();
 });
@@ -50,42 +48,34 @@ const CLIENT_KEY = Buffer.from(CLIENT_SECRET, 'base64');
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 let STORAGE_KEY = Buffer.from(process.env.STORAGE_KEY_HEX || crypto.randomBytes(32).toString('hex'), 'hex');
 
-// ---------- Асинхронная файловая БД с кешированием списков ----------
+// ====== Асинхронная файловая БД с кешированием списков ======
 const DATA_DIR = path.join(__dirname, 'data');
-(async () => {
-  try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) {}
-})();
+(async () => { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch(e) {} })();
 
 const listCache = new Map(); // bucket -> { keys: [], timestamp: number }
 
 async function ensureBucketDir(bucket) {
   const dir = path.join(DATA_DIR, bucket);
-  try { await fs.mkdir(dir, { recursive: true }); } catch (e) {}
+  try { await fs.mkdir(dir, { recursive: true }); } catch(e) {}
   return dir;
 }
 
 async function dbPut(bucket, key, data) {
   const dir = await ensureBucketDir(bucket);
-  const filePath = path.join(dir, key + '.json');
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+  await fs.writeFile(path.join(dir, key + '.json'), JSON.stringify(data, null, 2));
   listCache.delete(bucket);
 }
 
 async function dbGet(bucket, key) {
-  const filePath = path.join(DATA_DIR, bucket, key + '.json');
   try {
-    const content = await fs.readFile(filePath, 'utf-8');
+    const content = await fs.readFile(path.join(DATA_DIR, bucket, key + '.json'), 'utf-8');
     return JSON.parse(content);
-  } catch (e) {
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
 async function dbList(bucket) {
   const cached = listCache.get(bucket);
-  if (cached && (Date.now() - cached.timestamp < 2000)) {
-    return cached.keys;
-  }
+  if (cached && (Date.now() - cached.timestamp < 2000)) return cached.keys;
   const dir = path.join(DATA_DIR, bucket);
   try {
     await fs.mkdir(dir, { recursive: true });
@@ -93,36 +83,15 @@ async function dbList(bucket) {
     const keys = files.filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
     listCache.set(bucket, { keys, timestamp: Date.now() });
     return keys;
-  } catch (e) {
-    return [];
-  }
+  } catch(e) { return []; }
 }
 
 async function dbDelete(bucket, key) {
-  const filePath = path.join(DATA_DIR, bucket, key + '.json');
-  try { await fs.unlink(filePath); } catch (e) {}
+  try { await fs.unlink(path.join(DATA_DIR, bucket, key + '.json')); } catch(e) {}
   listCache.delete(bucket);
 }
 
-// ---------- Шифрование ----------
-function encryptForStorage(plaintext) {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', STORAGE_KEY, iv);
-  let encrypted = cipher.update(plaintext, 'utf8', 'base64');
-  encrypted += cipher.final('base64');
-  const tag = cipher.getAuthTag().toString('base64');
-  return JSON.stringify({ iv: iv.toString('base64'), data: encrypted, tag });
-}
-function decryptFromStorage(encryptedObj) {
-  try {
-    const { iv, data, tag } = JSON.parse(encryptedObj);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', STORAGE_KEY, Buffer.from(iv, 'base64'));
-    decipher.setAuthTag(Buffer.from(tag, 'base64'));
-    let decrypted = decipher.update(data, 'base64', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
-  } catch (e) { return null; }
-}
+// ====== Шифрование для клиентских данных ======
 async function decryptClientPayload(combinedBase64) {
   const combined = Buffer.from(combinedBase64, 'base64');
   const iv = combined.slice(0, 12);
@@ -135,43 +104,27 @@ async function decryptClientPayload(combinedBase64) {
   decrypted += decipher.final('utf8');
   return JSON.parse(decrypted);
 }
+
 async function encryptClientResponse(plainObj) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', CLIENT_KEY, iv);
   let encrypted = cipher.update(JSON.stringify(plainObj), 'utf8', 'base64');
   encrypted += cipher.final('base64');
   const authTag = cipher.getAuthTag();
-  const combined = Buffer.concat([iv, Buffer.from(encrypted, 'base64'), authTag]);
-  return combined.toString('base64');
+  return Buffer.concat([iv, Buffer.from(encrypted, 'base64'), authTag]).toString('base64');
 }
 
-// ---------- JWT Helpers ----------
+// ====== JWT ======
 function generateJWT(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 }
 function verifyJWT(token) {
-  try {
-    return jwt.verify(token, JWT_SECRET);
-  } catch (e) {
-    return null;
-  }
+  try { return jwt.verify(token, JWT_SECRET); } catch(e) { return null; }
 }
 
-// ---------- Загрузка файлов ----------
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fsSync.existsSync(uploadDir)) fsSync.mkdirSync(uploadDir, { recursive: true });
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, Date.now() + '_' + Math.random().toString(36).slice(2,8) + path.extname(file.originalname))
-});
-const upload = multer({ storage, limits: { fileSize: 10*1024*1024 } });
-const uploadTokens = {};
-
-// ========== КЕШИРОВАНИЕ (in-memory) ==========
+// ====== Кеши ======
 const userCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
-const clientCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 const tokenCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
-
 const announcementCache = { data: null, time: 0 };
 
 async function getCachedUser(login) {
@@ -181,22 +134,6 @@ async function getCachedUser(login) {
     if (user) userCache.set(login, user);
   }
   return user;
-}
-async function getCachedClient(clientId) {
-  let client = clientCache.get(clientId);
-  if (!client) {
-    client = await dbGet('oauth_clients', clientId);
-    if (client) clientCache.set(clientId, client);
-  }
-  return client;
-}
-async function getCachedToken(token) {
-  let record = tokenCache.get(token);
-  if (!record) {
-    record = await dbGet('oauth_tokens', token);
-    if (record) tokenCache.set(token, record);
-  }
-  return record;
 }
 
 let skyidIndex = null;
@@ -219,9 +156,8 @@ async function getUserBySkyid(skyid) {
 
 async function saveToken(token, login, expiresInSeconds = 7*24*3600) {
   const expires = Date.now() + expiresInSeconds * 1000;
-  const data = { login, expires };
-  await dbPut('tokens', token, data);
-  tokenCache.set(token, data);
+  await dbPut('tokens', token, { login, expires });
+  tokenCache.set(token, { login, expires });
 }
 async function getTokenData(token) {
   let data = tokenCache.get(token);
@@ -236,310 +172,35 @@ async function deleteToken(token) {
   tokenCache.del(token);
 }
 
-// ========== OAuth Клиенты (для совместимости) ==========
-function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['profile']) {
-  (async () => {
-    if (await dbGet('oauth_clients', clientId)) return;
-    await dbPut('oauth_clients', clientId, {
-      client_id: clientId,
-      client_secret: secret,
-      name,
-      redirect_uris: redirectUris,
-      allowed_scopes: allowedScopes,
-      default_scopes: ['profile']
-    });
-  })();
-}
+// ====== Загрузка файлов (multer) ======
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fsSync.existsSync(uploadDir)) fsSync.mkdirSync(uploadDir, { recursive: true });
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => cb(null, Date.now() + '_' + Math.random().toString(36).slice(2,8) + path.extname(file.originalname))
+});
+const upload = multer({ storage, limits: { fileSize: 10*1024*1024 } });
+const uploadTokens = {};
 
-registerClient('skyvideo', 'skyvideo_secret', 'SkyVideo',
-  [
-    'https://skyvideo.onrender.com/auth/callback',
-    'https://skycitadel.onrender.com/callback.html',
-    'https://skycitadel.cc.cd/callback.html'
-  ],
-  ['profile', 'email']
-);
-
-registerClient('skysocial', 'skysocial_secret', 'SkySocial',
-  [
-    'https://skycitadel.onrender.com/socnet.html',
-    'https://skycitadel.cc.cd/socnet.html',
-    'https://skycitadel.cc.cd/callback_social.html'
-  ],
-  ['profile', 'social']
-);
-
-const authSessions = {};
-function generateAuthSession(user, clientId, scope, redirectUri, state) {
-  const id = crypto.randomBytes(16).toString('hex');
-  authSessions[id] = {
-    user_skyid: user.skyid,
-    client_id: clientId,
-    scope,
-    redirect_uri: redirectUri,
-    state,
-    expires: Date.now() + 6000000
-  };
-  return id;
-}
-const pendingAuth = {};
-
-// ========== Health ==========
+// ====== Health ======
 app.get('/healthix', (req, res) => res.json({ status: 'ok' }));
 
-// ========== SkyCounter ==========
+// ====== SkyCounter ======
 const SITES = ['skycitadel.onrender.com', 'skycitadel.cc.cd'];
 app.get('/checkvizit', async (req, res) => {
   const site = req.query.site;
-  if (!site) return res.status(400).json({ error: 'Missing site' });
-  if (!SITES.includes(site)) return res.status(403).json({ error: 'Site not allowed' });
+  if (!site || !SITES.includes(site)) return res.status(400).json({ error: 'Invalid site' });
   const today = new Date().toISOString().split('T')[0];
   const visits = await dbGet('visits', today) || [];
-  if (!visits.includes(site)) { visits.push(site); await dbPut('visits', today, visits); return res.json({ status: 'ok', site, date: today }); }
+  if (!visits.includes(site)) {
+    visits.push(site);
+    await dbPut('visits', today, visits);
+    return res.json({ status: 'ok', site, date: today });
+  }
   res.json({ status: 'already_exists', site, date: today });
 });
 
-// ========== OAuth 2.1 Provider (для внешних клиентов) ==========
-app.get('/oauth/authorize', (req, res) => {
-  const { client_id, redirect_uri, scope, state } = req.query;
-  if (!client_id || !redirect_uri) return res.status(400).send('Missing client_id or redirect_uri');
-  const client = clientCache.get(client_id);
-  if (!client) return res.status(400).send('Invalid client_id');
-  if (!client.redirect_uris.includes(redirect_uri)) return res.status(400).send('Invalid redirect_uri');
-  const requestedScopes = scope ? scope.split(' ') : client.default_scopes;
-  const invalidScopes = requestedScopes.filter(s => !client.allowed_scopes.includes(s));
-  if (invalidScopes.length) return res.status(400).send('Invalid scope(s): ' + invalidScopes.join(', '));
-
-  res.send(`<!DOCTYPE html>
-    <html lang="ru">
-    <head><meta charset="UTF-8"><title>SkyID — Вход</title>
-    <style>
-      body { background: #0a0f1e; color: #e0e8ff; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-      .card { background: #1a233a; padding: 2rem; border-radius: 20px; border: 1px solid #2a3450; text-align: center; }
-      input { width: 100%; padding: 0.7rem; margin: 0.5rem 0; background: #0d1225; border: 1px solid #3a4660; color: white; border-radius: 10px; }
-      .btn { background: #5f7ecf; border: none; color: white; padding: 0.7rem 1.5rem; border-radius: 10px; cursor: pointer; font-weight: bold; margin-top: 0.5rem; }
-      .error { color: #f48024; margin-top: 0.5rem; }
-    </style></head>
-    <body>
-      <div class="card">
-        <h2>Вход в SkyID</h2>
-        <p>Приложение запрашивает доступ к вашему идентификатору</p>
-        <form action="/oauth/authorize" method="POST">
-          <input type="hidden" name="client_id" value="${client_id}">
-          <input type="hidden" name="redirect_uri" value="${redirect_uri}">
-          <input type="hidden" name="scope" value="${requestedScopes.join(' ')}">
-          <input type="hidden" name="state" value="${state || ''}">
-          <input type="text" name="login" placeholder="Логин" required>
-          <input type="password" name="password" placeholder="Пароль" required>
-          <button type="submit" class="btn">Войти</button>
-        </form>
-        <div class="error" id="error"></div>
-      </div>
-    </body>
-    </html>
-  `);
-});
-
-app.post('/oauth/authorize', async (req, res) => {
-  const { login, password, client_id, redirect_uri, scope, state } = req.body;
-  if (!login || !password || !client_id || !redirect_uri) return res.status(400).json({ error: 'Missing fields' });
-
-  const user = await getCachedUser(login);
-  if (!user) return res.status(401).json({ error: 'Неверный логин или пароль' });
-  const hash = await new Promise((resolve, reject) => {
-    crypto.pbkdf2(password, user.salt, 10000, 64, 'sha512', (err, derivedKey) => {
-      if (err) reject(err);
-      else resolve(derivedKey.toString('hex'));
-    });
-  });
-  if (hash !== user.hash) return res.status(401).json({ error: 'Неверный логин или пароль' });
-
-  const client = await getCachedClient(client_id);
-  if (!client) return res.status(400).json({ error: 'Invalid client' });
-
-  const requestedScopes = scope ? scope.split(' ') : client.default_scopes;
-  const sessionId = generateAuthSession(user, client_id, requestedScopes, redirect_uri, state);
-  res.redirect(`/oauth/consent?session=${sessionId}`);
-});
-
-app.get('/oauth/consent', (req, res) => {
-  const sessionId = req.query.session;
-  const session = authSessions[sessionId];
-  if (!session || session.expires < Date.now()) return res.status(400).send('Сессия истекла');
-  const client = clientCache.get(session.client_id);
-  if (!client) return res.status(400).send('Клиент не найден');
-  const scopeDescriptions = {
-    'profile': 'Ваше имя и аватар',
-    'email': 'Ваш адрес электронной почты',
-    'phone': 'Ваш номер телефона',
-    'social': 'Доступ к публикациям и комментариям'
-  };
-  const scopeListHtml = session.scope.map(s => `<li>${scopeDescriptions[s] || s}</li>`).join('');
-  res.send(`<!DOCTYPE html>
-    <html lang="ru">
-    <head><meta charset="UTF-8"><title>Запрос доступа</title>
-    <style>
-      body { background: #0a0f1e; color: #e0e8ff; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-      .card { background: #1a233a; padding: 2rem; border-radius: 20px; border: 1px solid #2a3450; max-width: 500px; width: 100%; }
-      h2 { color: #b7ceff; }
-      ul { list-style: none; padding: 0; }
-      li { padding: 0.5rem; border-bottom: 1px solid #2a3450; }
-      .btn-row { display: flex; gap: 1rem; justify-content: center; margin-top: 1.5rem; }
-      .btn { padding: 0.7rem 2rem; border: none; border-radius: 10px; cursor: pointer; font-weight: bold; }
-      .allow { background: #5f7ecf; color: white; }
-      .deny { background: #6b4c4c; color: white; }
-    </style>
-    </head>
-    <body>
-      <div class="card">
-        <h2>${client.name} запрашивает доступ</h2>
-        <p>Приложение хочет получить:</p>
-        <ul>${scopeListHtml}</ul>
-        <form action="/oauth/consent" method="POST">
-          <input type="hidden" name="session" value="${sessionId}">
-          <div class="btn-row">
-            <button type="submit" name="action" value="allow" class="btn allow">Разрешить</button>
-            <button type="submit" name="action" value="deny" class="btn deny">Отказать</button>
-          </div>
-        </form>
-      </div>
-    </body>
-    </html>
-  `);
-});
-
-app.post('/oauth/consent', (req, res) => {
-  const { session: sessionId, action } = req.body;
-  const session = authSessions[sessionId];
-  if (!session || session.expires < Date.now()) return res.status(400).send('Сессия истекла');
-  if (action === 'deny') {
-    const params = new URLSearchParams({ error: 'access_denied', state: session.state || '' });
-    return res.redirect(`${session.redirect_uri}?${params.toString()}`);
-  }
-  const code = crypto.randomBytes(16).toString('hex');
-  pendingAuth[code] = {
-    skyid: session.user_skyid,
-    client_id: session.client_id,
-    scope: session.scope,
-    redirect_uri: session.redirect_uri,
-    expires: Date.now() + 600000
-  };
-  delete authSessions[sessionId];
-  const params = new URLSearchParams({ code, state: session.state || '' });
-  res.redirect(`${session.redirect_uri}?${params.toString()}`);
-});
-
-app.post('/oauth/token', async (req, res) => {
-  const { code, client_id, client_secret, redirect_uri } = req.body;
-  if (!code || !client_id) return res.status(400).json({ error: 'Missing parameters' });
-  const client = await getCachedClient(client_id);
-  if (!client) return res.status(400).json({ error: 'Invalid client' });
-  if (redirect_uri && !client.redirect_uris.includes(redirect_uri)) {
-    return res.status(400).json({ error: 'Invalid redirect_uri' });
-  }
-  const pending = pendingAuth[code];
-  if (!pending || pending.expires < Date.now()) {
-    delete pendingAuth[code];
-    return res.status(400).json({ error: 'Invalid or expired code' });
-  }
-  if (pending.client_id !== client_id) {
-    return res.status(400).json({ error: 'Client mismatch' });
-  }
-
-  const accessToken = crypto.randomBytes(32).toString('hex');
-  const authRecord = {
-    user_skyid: pending.skyid,
-    client_id: client_id,
-    scope: pending.scope,
-    access_token: accessToken,
-    created_at: Date.now()
-  };
-  await dbPut('oauth_tokens', accessToken, authRecord);
-  tokenCache.set(accessToken, authRecord);
-
-  delete pendingAuth[code];
-  res.json({
-    access_token: accessToken,
-    token_type: 'Bearer',
-    expires_in: 3600,
-    scope: pending.scope.join(' '),
-    skyid: pending.skyid
-  });
-});
-
-app.get('/me', async (req, res) => {
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-
-  const tokenRecord = await getCachedToken(auth);
-  if (!tokenRecord) return res.status(401).json({ error: 'Invalid token' });
-
-  const user = await getUserBySkyid(tokenRecord.user_skyid);
-  if (!user) return res.status(401).json({ error: 'User not found' });
-
-  const result = { skyid: user.skyid };
-  if (tokenRecord.scope.includes('profile')) {
-    result.login = user.login;
-    result.name = user.name || user.login;
-    result.avatar = user.avatar || '';
-  }
-  if (tokenRecord.scope.includes('email')) {
-    result.email = user.email || '';
-  }
-  if (tokenRecord.scope.includes('phone')) {
-    result.phone = user.phone || '';
-  }
-  res.json(result);
-});
-
-app.get('/oauth/authorizations', async (req, res) => {
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const tokenRecord = await getCachedToken(auth);
-  if (!tokenRecord) return res.status(401).json({ error: 'Invalid token' });
-
-  const allTokens = await dbList('oauth_tokens');
-  const userAuths = [];
-  for (const id of allTokens) {
-    const rec = await dbGet('oauth_tokens', id);
-    if (rec && rec.user_skyid === tokenRecord.user_skyid) userAuths.push(rec);
-  }
-
-  const result = {};
-  userAuths.forEach(rec => {
-    if (!result[rec.client_id]) {
-      result[rec.client_id] = { client_id: rec.client_id, scope: [], first_issued: rec.created_at };
-    }
-    result[rec.client_id].scope = [...new Set([...result[rec.client_id].scope, ...rec.scope])];
-  });
-  for (const clientId in result) {
-    const client = await getCachedClient(clientId);
-    result[clientId].name = client ? client.name : clientId;
-  }
-  res.json(Object.values(result));
-});
-
-app.delete('/oauth/authorizations/:client_id', async (req, res) => {
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const tokenRecord = await getCachedToken(auth);
-  if (!tokenRecord) return res.status(401).json({ error: 'Invalid token' });
-
-  const clientId = req.params.client_id;
-  const tokens = await dbList('oauth_tokens');
-  let deleted = 0;
-  for (const id of tokens) {
-    const rec = await dbGet('oauth_tokens', id);
-    if (rec && rec.user_skyid === tokenRecord.user_skyid && rec.client_id === clientId) {
-      await dbDelete('oauth_tokens', id);
-      tokenCache.del(id);
-      deleted++;
-    }
-  }
-  res.json({ ok: true, deleted });
-});
-
-// ========== Упрощённая аутентификация (SkyAuth) с JWT ==========
+// ====== Регистрация и логин (SkyAuth) ======
 app.post('/register', async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ error: 'No data' });
@@ -558,8 +219,9 @@ app.post('/register', async (req, res) => {
     const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
     const token = crypto.randomBytes(32).toString('hex');
     const jwtToken = generateJWT({ skyid, login });
-    await dbPut('skyid_users', login, { skyid, login, salt, hash, token });
-    userCache.set(login, { skyid, login, salt, hash, token });
+    const userData = { skyid, login, salt, hash, token };
+    await dbPut('skyid_users', login, userData);
+    userCache.set(login, userData);
     await saveToken(token, login, 7*24*3600);
     if (skyidIndex) skyidIndex.set(skyid, login);
     if (!(await dbGet('chat_users', login))) {
@@ -567,7 +229,7 @@ app.post('/register', async (req, res) => {
     }
     const enc = await encryptClientResponse({ skyid, token, jwt: jwtToken });
     res.json({ data: enc });
-  } catch (e) {
+  } catch(e) {
     res.status(400).json({ error: e.message });
   }
 });
@@ -596,219 +258,41 @@ app.post('/login', async (req, res) => {
     await saveToken(newToken, login, 7*24*3600);
     const enc = await encryptClientResponse({ skyid: user.skyid, token: newToken, jwt: jwtToken });
     res.json({ data: enc });
-  } catch (e) {
+  } catch(e) {
     res.status(400).json({ error: e.message });
   }
 });
 
+// ====== Проверка токена (для внутренних сервисов) ======
 app.post('/verify', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace('Bearer ', '') || req.body.token;
   if (!token) return res.status(400).json({ error: 'Token required' });
 
+  // 1. Проверяем JWT
   const decoded = verifyJWT(token);
   if (decoded) {
     const user = await getUserBySkyid(decoded.skyid);
-    if (user) {
-      return res.json({ skyid: decoded.skyid, login: decoded.login });
-    }
+    if (user) return res.json({ skyid: decoded.skyid, login: decoded.login });
   }
 
+  // 2. Проверяем обычный токен из БД
   const tokenData = await getTokenData(token);
-  if (!tokenData) return res.status(401).json({ error: 'Invalid token' });
-  if (tokenData.expires < Date.now()) {
-    await deleteToken(token);
-    return res.status(401).json({ error: 'Token expired' });
+  if (!tokenData || tokenData.expires < Date.now()) {
+    if (tokenData) await deleteToken(token);
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
   const user = await getCachedUser(tokenData.login);
   if (!user) return res.status(401).json({ error: 'User not found' });
   res.json({ skyid: user.skyid, login: user.login });
 });
 
-// ========== Чат-регистрация ==========
-app.post('/chat/register', async (req, res) => {
-  const { login, salt } = req.body;
-  if (!login || !salt) return res.status(400).json({ error: 'login and salt required' });
-  if (await dbGet('chat_users', login)) return res.status(409).json({ error: 'User exists' });
-  await dbPut('chat_users', login, { salt, name: login, avatar: '', status: 'online' });
-  res.json({ ok: true });
-});
-app.get('/chat/login_salt', async (req, res) => {
-  const login = req.query.login;
-  if (!login) return res.status(400).json({ error: 'login required' });
-  const user = await dbGet('chat_users', login);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ salt: user.salt });
-});
-
-// ========== Погода ==========
-app.post('/api/weather', async (req, res) => {
-  const { data } = req.body;
-  if (!data) return res.status(400).json({ error: 'No data' });
-  const payload = await decryptClientPayload(data);
-  const city = payload.city;
-  if (!city) return res.status(400).json({ error: 'City required' });
-  const weatherRes = await axios.get(`https://wttr.in/${encodeURIComponent(city)}?format=j1`, { timeout: 8000 });
-  const current = weatherRes.data.current_condition[0];
-  const answer = { temp: current.temp_C, desc: current.weatherDesc[0].value, city };
-  const enc = await encryptClientResponse(answer);
-  res.json({ data: enc });
-});
-
-// ========== Объявления (с кешированием) ==========
-app.get('/announcements', async (req, res) => {
-  if (Date.now() - announcementCache.time < 60000 && announcementCache.data) {
-    return res.json({ data: await encryptClientResponse(announcementCache.data) });
-  }
-  const keys = await dbList('announcements');
-  const list = [];
-  for (const k of keys) {
-    const item = await dbGet('announcements', k);
-    if (item) list.push(item);
-  }
-  list.sort((a,b) => b.created - a.created);
-  announcementCache.data = list;
-  announcementCache.time = Date.now();
-  const enc = await encryptClientResponse(list);
-  res.json({ data: enc });
-});
-app.post('/announcements', async (req, res) => {
-  const { data } = req.body;
-  if (!data) return res.status(400).json({ error: 'No data' });
-  const payload = await decryptClientPayload(data);
-  const text = payload.text;
-  if (!text) return res.status(400).json({ error: 'Text required' });
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  let isAdmin = false;
-  const decoded = verifyJWT(auth);
-  if (decoded && decoded.login === ADMIN_LOGIN) {
-    isAdmin = true;
-  } else {
-    const users = await dbList('skyid_users');
-    for (const login of users) {
-      const u = await getCachedUser(login);
-      if (u && u.token === auth && u.login === ADMIN_LOGIN) { isAdmin = true; break; }
-    }
-  }
-  if (!isAdmin) return res.status(403).json({ error: 'Forbidden' });
-  const ann = { id: 'ann_' + Date.now(), text, created: Date.now() };
-  await dbPut('announcements', ann.id, ann);
-  announcementCache.data = null;
-  announcementCache.time = 0;
-  const enc = await encryptClientResponse({ ok: true });
-  res.json({ data: enc });
-});
-
-// ========== Прокси ==========
-app.get('/proxy', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('URL required');
-  try {
-    const response = await axios.get(targetUrl, {
-      responseType: 'text',
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      maxRedirects: 5, timeout: 15000
-    });
-    delete response.headers['x-frame-options'];
-    delete response.headers['content-security-policy'];
-    let html = response.data;
-    const $ = cheerio.load(html);
-    $('a[href]').each((i, el) => {
-      const href = $(el).attr('href');
-      if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.startsWith('data:')) {
-        try {
-          const absolute = new URL(href, targetUrl).href;
-          $(el).attr('href', `/proxy?url=${encodeURIComponent(absolute)}`);
-        } catch (e) {}
-      }
-    });
-    $('head').prepend(`<base href="${targetUrl}">`);
-    res.set(response.headers);
-    res.send($.html());
-  } catch (error) { res.status(500).send('Proxy error: ' + error.message); }
-});
-
-// ========== Поиск групп ==========
-app.get('/search_groups', async (req, res) => {
-  const q = (req.query.q || '').toLowerCase();
-  const ids = await dbList('chats');
-  const results = [];
-  for (const id of ids) {
-    const chat = await dbGet('chats', id);
-    if (chat && (chat.type === 'group' || chat.type === 'channel') && chat.name.toLowerCase().includes(q)) {
-      results.push({ id, type: chat.type, name: chat.name, membersCount: chat.members.length });
-    }
-  }
-  res.json(results);
-});
-
-// ========== Файлы ==========
-app.get('/get_upload_token', (req, res) => {
-  const token = crypto.randomBytes(16).toString('hex');
-  uploadTokens[token] = { valid: true, created: Date.now() };
-  res.json({ token });
-});
-app.post('/upload_file', upload.single('file'), (req, res) => {
-  const token = req.headers['x-upload-token'];
-  if (!token || !uploadTokens[token]?.valid) return res.status(403).json({ error: 'Invalid token' });
-  const file = req.file;
-  if (!file) return res.status(400).json({ error: 'No file' });
-  const fileUrl = `/files/${file.filename}`;
-  res.json({ url: fileUrl, name: file.originalname, size: file.size, type: file.mimetype });
-});
-app.get('/files/:filename', (req, res) => {
-  const filePath = path.join(uploadDir, req.params.filename);
-  if (!fsSync.existsSync(filePath)) return res.status(404).send('File not found');
-  res.sendFile(filePath);
-});
-
-// ========== Spotify ==========
-app.post('/spotify/token', async (req, res) => {
-  const { code, code_verifier, redirect_uri } = req.body;
-  const client_id = process.env.SPOTIFY_CLIENT_ID;
-  const client_secret = process.env.SPOTIFY_CLIENT_SECRET;
-  if (!code || !code_verifier || !client_id || !client_secret) return res.status(400).json({ error: 'Missing params' });
-  const params = new URLSearchParams({ grant_type:'authorization_code', code, redirect_uri, client_id, code_verifier });
-  const response = await axios.post('https://accounts.spotify.com/api/token', params.toString(), {
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: 'Basic ' + Buffer.from(client_id + ':' + client_secret).toString('base64')
-    }
-  });
-  res.json(response.data);
-});
-app.post('/spotify/save-token', async (req, res) => {
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const users = await dbList('skyid_users');
-  let login = null;
-  for (const l of users) { const u = await getCachedUser(l); if (u && u.token === auth) { login = l; break; } }
-  if (!login) return res.status(401).json({ error: 'Invalid user' });
-  const { spotify_token, spotify_refresh, expires_at } = req.body;
-  if (!spotify_token) return res.status(400).json({ error: 'Missing token' });
-  const enc = encryptForStorage(JSON.stringify({ access_token: spotify_token, refresh_token: spotify_refresh || null, expires_at: expires_at || null }));
-  await dbPut('spotify_tokens', login, JSON.parse(enc));
-  res.json({ ok: true });
-});
-app.get('/spotify/get-token', async (req, res) => {
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const users = await dbList('skyid_users');
-  let login = null;
-  for (const l of users) { const u = await getCachedUser(l); if (u && u.token === auth) { login = l; break; } }
-  if (!login) return res.status(401).json({ error: 'Invalid user' });
-  const encObj = await dbGet('spotify_tokens', login);
-  if (!encObj) return res.json({ token: null });
-  const data = JSON.parse(decryptFromStorage(JSON.stringify(encObj)));
-  res.json({ access_token: data.access_token, refresh_token: data.refresh_token, expires_at: data.expires_at });
-});
-
-// ========== Соцсеть ==========
+// ====== Социальная сеть ======
 async function verifyToken(req, res, next) {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
 
+  // Проверяем JWT
   const decoded = verifyJWT(auth);
   if (decoded) {
     const user = await getUserBySkyid(decoded.skyid);
@@ -820,17 +304,7 @@ async function verifyToken(req, res, next) {
     }
   }
 
-  const oauthRec = await getCachedToken(auth);
-  if (oauthRec) {
-    const user = await getUserBySkyid(oauthRec.user_skyid);
-    if (user) {
-      req.skyid = user.skyid;
-      req.login = user.login;
-      req.isAdmin = (user.login === ADMIN_LOGIN);
-      return next();
-    }
-  }
-
+  // Проверяем обычный токен
   const tokenData = await getTokenData(auth);
   if (tokenData && tokenData.expires > Date.now()) {
     const user = await getCachedUser(tokenData.login);
@@ -842,6 +316,7 @@ async function verifyToken(req, res, next) {
     }
   }
 
+  // Fallback: старый токен из skyid_users (перебор)
   const users = await dbList('skyid_users');
   for (const login of users) {
     const user = await getCachedUser(login);
@@ -854,7 +329,10 @@ async function verifyToken(req, res, next) {
   }
   res.status(401).json({ error: 'Invalid token' });
 }
-function adminRequired(req, res, next) { if (!req.isAdmin) return res.status(403).json({ error: 'Forbidden' }); next(); }
+function adminRequired(req, res, next) {
+  if (!req.isAdmin) return res.status(403).json({ error: 'Forbidden' });
+  next();
+}
 
 app.get('/posts', verifyToken, async (req, res) => {
   const ids = await dbList('social_posts');
@@ -884,7 +362,8 @@ app.post('/posts/:id/like', verifyToken, async (req, res) => {
   const post = await dbGet('social_posts', req.params.id);
   if (!post) return res.status(404).json({ error: 'Not found' });
   post.dislikes = post.dislikes.filter(id => id !== req.skyid);
-  if (!post.likes.includes(req.skyid)) post.likes.push(req.skyid); else post.likes = post.likes.filter(id => id !== req.skyid);
+  if (!post.likes.includes(req.skyid)) post.likes.push(req.skyid);
+  else post.likes = post.likes.filter(id => id !== req.skyid);
   await dbPut('social_posts', req.params.id, post);
   res.json({ likes: post.likes.length, dislikes: post.dislikes.length });
 });
@@ -892,7 +371,8 @@ app.post('/posts/:id/dislike', verifyToken, async (req, res) => {
   const post = await dbGet('social_posts', req.params.id);
   if (!post) return res.status(404).json({ error: 'Not found' });
   post.likes = post.likes.filter(id => id !== req.skyid);
-  if (!post.dislikes.includes(req.skyid)) post.dislikes.push(req.skyid); else post.dislikes = post.dislikes.filter(id => id !== req.skyid);
+  if (!post.dislikes.includes(req.skyid)) post.dislikes.push(req.skyid);
+  else post.dislikes = post.dislikes.filter(id => id !== req.skyid);
   await dbPut('social_posts', req.params.id, post);
   res.json({ likes: post.likes.length, dislikes: post.dislikes.length });
 });
@@ -933,12 +413,187 @@ app.post('/admin/unban', verifyToken, adminRequired, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ========== Поиск (SkySearch) – заглушка ==========
-app.post('/api/search', async (req, res) => {
-  res.json({ data: await encryptClientResponse({ query: '', results: [] }) });
+// ====== Объявления (с кешированием) ======
+app.get('/announcements', async (req, res) => {
+  if (Date.now() - announcementCache.time < 60000 && announcementCache.data) {
+    return res.json({ data: await encryptClientResponse(announcementCache.data) });
+  }
+  const keys = await dbList('announcements');
+  const list = [];
+  for (const k of keys) {
+    const item = await dbGet('announcements', k);
+    if (item) list.push(item);
+  }
+  list.sort((a,b) => b.created - a.created);
+  announcementCache.data = list;
+  announcementCache.time = Date.now();
+  res.json({ data: await encryptClientResponse(list) });
+});
+app.post('/announcements', async (req, res) => {
+  const { data } = req.body;
+  if (!data) return res.status(400).json({ error: 'No data' });
+  const payload = await decryptClientPayload(data);
+  const text = payload.text;
+  if (!text) return res.status(400).json({ error: 'Text required' });
+  const auth = req.headers.authorization?.replace('Bearer ', '');
+  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+
+  let isAdmin = false;
+  const decoded = verifyJWT(auth);
+  if (decoded && decoded.login === ADMIN_LOGIN) isAdmin = true;
+  else {
+    const users = await dbList('skyid_users');
+    for (const login of users) {
+      const u = await getCachedUser(login);
+      if (u && u.token === auth && u.login === ADMIN_LOGIN) { isAdmin = true; break; }
+    }
+  }
+  if (!isAdmin) return res.status(403).json({ error: 'Forbidden' });
+
+  const ann = { id: 'ann_' + Date.now(), text, created: Date.now() };
+  await dbPut('announcements', ann.id, ann);
+  announcementCache.data = null;
+  announcementCache.time = 0;
+  res.json({ data: await encryptClientResponse({ ok: true }) });
 });
 
-// ========== WebSocket (мессенджер) ==========
+// ====== Погода ======
+app.post('/api/weather', async (req, res) => {
+  const { data } = req.body;
+  if (!data) return res.status(400).json({ error: 'No data' });
+  const payload = await decryptClientPayload(data);
+  const city = payload.city;
+  if (!city) return res.status(400).json({ error: 'City required' });
+  const weatherRes = await axios.get(`https://wttr.in/${encodeURIComponent(city)}?format=j1`, { timeout: 8000 });
+  const current = weatherRes.data.current_condition[0];
+  const answer = { temp: current.temp_C, desc: current.weatherDesc[0].value, city };
+  res.json({ data: await encryptClientResponse(answer) });
+});
+
+// ====== Прокси ======
+app.get('/proxy', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('URL required');
+  try {
+    const response = await axios.get(targetUrl, {
+      responseType: 'text',
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      maxRedirects: 5, timeout: 15000
+    });
+    delete response.headers['x-frame-options'];
+    delete response.headers['content-security-policy'];
+    let html = response.data;
+    const $ = cheerio.load(html);
+    $('a[href]').each((i, el) => {
+      const href = $(el).attr('href');
+      if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.startsWith('data:')) {
+        try {
+          const absolute = new URL(href, targetUrl).href;
+          $(el).attr('href', `/proxy?url=${encodeURIComponent(absolute)}`);
+        } catch(e) {}
+      }
+    });
+    $('head').prepend(`<base href="${targetUrl}">`);
+    res.set(response.headers);
+    res.send($.html());
+  } catch(e) {
+    res.status(500).send('Proxy error: ' + e.message);
+  }
+});
+
+// ====== Поиск групп ======
+app.get('/search_groups', async (req, res) => {
+  const q = (req.query.q || '').toLowerCase();
+  const ids = await dbList('chats');
+  const results = [];
+  for (const id of ids) {
+    const chat = await dbGet('chats', id);
+    if (chat && (chat.type === 'group' || chat.type === 'channel') && chat.name.toLowerCase().includes(q)) {
+      results.push({ id, type: chat.type, name: chat.name, membersCount: chat.members.length });
+    }
+  }
+  res.json(results);
+});
+
+// ====== Файлы ======
+app.get('/get_upload_token', (req, res) => {
+  const token = crypto.randomBytes(16).toString('hex');
+  uploadTokens[token] = { valid: true, created: Date.now() };
+  res.json({ token });
+});
+app.post('/upload_file', upload.single('file'), (req, res) => {
+  const token = req.headers['x-upload-token'];
+  if (!token || !uploadTokens[token]?.valid) return res.status(403).json({ error: 'Invalid token' });
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: 'No file' });
+  res.json({ url: `/files/${file.filename}`, name: file.originalname, size: file.size, type: file.mimetype });
+});
+app.get('/files/:filename', (req, res) => {
+  const filePath = path.join(uploadDir, req.params.filename);
+  if (!fsSync.existsSync(filePath)) return res.status(404).send('File not found');
+  res.sendFile(filePath);
+});
+
+// ====== Spotify ======
+app.post('/spotify/token', async (req, res) => {
+  const { code, code_verifier, redirect_uri } = req.body;
+  const client_id = process.env.SPOTIFY_CLIENT_ID;
+  const client_secret = process.env.SPOTIFY_CLIENT_SECRET;
+  if (!code || !code_verifier || !client_id || !client_secret) return res.status(400).json({ error: 'Missing params' });
+  const params = new URLSearchParams({ grant_type:'authorization_code', code, redirect_uri, client_id, code_verifier });
+  const response = await axios.post('https://accounts.spotify.com/api/token', params.toString(), {
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: 'Basic ' + Buffer.from(client_id + ':' + client_secret).toString('base64')
+    }
+  });
+  res.json(response.data);
+});
+app.post('/spotify/save-token', async (req, res) => {
+  const auth = req.headers.authorization?.replace('Bearer ', '');
+  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+  const users = await dbList('skyid_users');
+  let login = null;
+  for (const l of users) {
+    const u = await getCachedUser(l);
+    if (u && u.token === auth) { login = l; break; }
+  }
+  if (!login) return res.status(401).json({ error: 'Invalid user' });
+  const { spotify_token, spotify_refresh, expires_at } = req.body;
+  if (!spotify_token) return res.status(400).json({ error: 'Missing token' });
+  const enc = (() => {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', STORAGE_KEY, iv);
+    let enc = cipher.update(JSON.stringify({ access_token: spotify_token, refresh_token: spotify_refresh || null, expires_at: expires_at || null }), 'utf8', 'base64');
+    enc += cipher.final('base64');
+    const tag = cipher.getAuthTag().toString('base64');
+    return JSON.stringify({ iv: iv.toString('base64'), data: enc, tag });
+  })();
+  await dbPut('spotify_tokens', login, JSON.parse(enc));
+  res.json({ ok: true });
+});
+app.get('/spotify/get-token', async (req, res) => {
+  const auth = req.headers.authorization?.replace('Bearer ', '');
+  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+  const users = await dbList('skyid_users');
+  let login = null;
+  for (const l of users) {
+    const u = await getCachedUser(l);
+    if (u && u.token === auth) { login = l; break; }
+  }
+  if (!login) return res.status(401).json({ error: 'Invalid user' });
+  const encObj = await dbGet('spotify_tokens', login);
+  if (!encObj) return res.json({ token: null });
+  const { iv, data, tag } = encObj;
+  const decipher = crypto.createDecipheriv('aes-256-gcm', STORAGE_KEY, Buffer.from(iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(tag, 'base64'));
+  let decrypted = decipher.update(data, 'base64', 'utf8');
+  decrypted += decipher.final('utf8');
+  const parsed = JSON.parse(decrypted);
+  res.json({ access_token: parsed.access_token, refresh_token: parsed.refresh_token, expires_at: parsed.expires_at });
+});
+
+// ====== WebSocket (мессенджер) ======
 const server = http.createServer(app);
 server.timeout = 120000;
 
@@ -950,7 +605,7 @@ wss.on('connection', (ws) => {
   let currentUser = null;
   ws.on('message', async (raw) => {
     let msg;
-    try { msg = JSON.parse(raw); } catch (e) { return; }
+    try { msg = JSON.parse(raw); } catch(e) { return; }
     if (msg.type === 'auth') {
       const user = await dbGet('chat_users', msg.login);
       if (!user) return ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
@@ -989,7 +644,7 @@ wss.on('connection', (ws) => {
           await forwardSignaling(msg, currentUser); break;
         default: ws.send(JSON.stringify({ type: 'error', message: 'Unknown type' }));
       }
-    } catch (e) { ws.send(JSON.stringify({ type: 'error', message: 'Server error' })); }
+    } catch(e) { ws.send(JSON.stringify({ type: 'error', message: 'Server error' })); }
   });
   ws.on('close', () => {
     if (currentUser) {
@@ -1142,4 +797,10 @@ async function forwardSignaling(msg, from) {
   }
 }
 
+// ====== OAuth (для обратной совместимости, но не используется) ======
+// (оставлены базовые эндпоинты, но они не влияют на работу)
+app.get('/oauth/authorize', (req, res) => res.status(501).send('OAuth deprecated, use /login'));
+app.post('/oauth/token', (req, res) => res.status(501).send('OAuth deprecated, use /login'));
+
+// ====== Запуск ======
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
