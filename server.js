@@ -531,7 +531,6 @@ app.post('/api/weather', async (req, res) => {
 });
 
 // ========== Объявления (с кешированием) ==========
-let announcementCache = { data: null, time: 0 };
 app.get('/announcements', async (req, res) => {
   if (Date.now() - announcementCache.time < 60000 && announcementCache.data) {
     return res.json({ data: await encryptClientResponse(announcementCache.data) });
