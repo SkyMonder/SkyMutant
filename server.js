@@ -8,6 +8,10 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const cheerio = require('cheerio');
+const NodeCache = require('node-cache');
+const userCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
+const clientCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
+const tokenCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 
 const app = express();
 
@@ -221,17 +225,35 @@ app.post('/oauth/authorize', async (req, res) => {
   const { login, password, client_id, redirect_uri, scope, state } = req.body;
   if (!login || !password || !client_id || !redirect_uri) return res.status(400).json({ error: 'Missing fields' });
 
-  const user = dbGet('skyid_users', login);
-  if (!user) return res.status(401).json({ error: 'Неверный логин или пароль' });
-  const hash = crypto.pbkdf2Sync(password, user.salt, 100000, 64, 'sha512').toString('hex');
-  if (hash !== user.hash) return res.status(401).json({ error: 'Неверный логин или пароль' });
+  // Вместо dbGet('skyid_users', login) используйте:
+  function getCachedUser(login) {
+    let user = userCache.get(login);
+    if (!user) {
+      user = dbGet('skyid_users', login);
+    if (user) userCache.set(login, user);
+    }
+    return user;
+  }
 
-  const client = dbGet('oauth_clients', client_id);
-  if (!client) return res.status(400).json({ error: 'Invalid client' });
+// Вместо dbGet('oauth_clients', clientId) используйте:
+  function getCachedClient(clientId) {
+    let client = clientCache.get(clientId);
+    if (!client) {
+      client = dbGet('oauth_clients', clientId);
+      if (client) clientCache.set(clientId, client);
+    }
+    return client;
+  }
 
-  const requestedScopes = scope ? scope.split(' ') : client.default_scopes;
-  const sessionId = generateAuthSession(user, client_id, requestedScopes, redirect_uri, state);
-  res.redirect(`/oauth/consent?session=${sessionId}`);
+  // Вместо dbGet('oauth_tokens', token) используйте:
+  function getCachedToken(token) {
+    let record = tokenCache.get(token);
+    if (!record) {
+      record = dbGet('oauth_tokens', token);
+      if (record) tokenCache.set(token, record);
+    }
+    return record;
+  }
 });
 
 // GET /oauth/consent – страница согласия
