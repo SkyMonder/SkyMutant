@@ -613,8 +613,50 @@ app.post('/admin/unban', verifyToken, adminRequired, async (req, res) => {
 });
 
 // ========== Поиск (заглушка) ==========
-app.post('/api/search', async (req, res) => {
-  res.json({ data: await encryptClientResponse({ query: '', results: [] }) });
+// ====== ПОИСК (OpenSERP) ======
+app.get('/api/search', async (req, res) => {
+  const query = req.query.q;
+  const count = parseInt(req.query.count) || 10;
+  const offset = parseInt(req.query.offset) || 0;
+  const engine = req.query.engine || 'duckduckgo'; // можно выбрать: google, bing, yandex, baidu, duckduckgo, ecosia
+
+  if (!query) {
+    return res.status(400).json({ error: 'Missing query parameter "q"' });
+  }
+
+
+  try {
+    // OpenSERP использует пагинацию через параметр start
+    const openserpUrl = `${OPENSERP_URL}/${engine}/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}`;
+    
+    const response = await fetch(openserpUrl);
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('OpenSERP error:', response.status, errorText);
+      return res.status(response.status).json({ error: 'Search engine error' });
+    }
+
+    const data = await response.json();
+
+    // Форматируем ответ так же, как было в Brave API, чтобы search.html не менять
+    const results = data.results?.map(item => ({
+      title: item.title || '',
+      url: item.url || '',
+      description: item.snippet || item.description || '',
+      icon: item.favicon || `https://www.google.com/s2/favicons?domain=${item.domain || new URL(item.url).hostname}&sz=32`
+    })) || [];
+
+    res.json({
+      query,
+      results,
+      total: results.length, // OpenSERP не возвращает общее количество, используем длину массива
+      nextOffset: offset + results.length
+    });
+
+  } catch (err) {
+    console.error('Search error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // ========== WebSocket (мессенджер) ==========
