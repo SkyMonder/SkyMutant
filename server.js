@@ -162,6 +162,7 @@ const uploadTokens = {};
 
 // ========== КЕШИРОВАНИЕ ==========
 const userCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
+const searchCache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 минут
 const tokenCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 const announcementCache = { data: null, time: 0 };
 
