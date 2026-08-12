@@ -505,9 +505,17 @@ app.post('/api/weather', async (req, res) => {
 });
 
 // ========== Объявления ==========
+let announcementCache = null;
+let announcementCacheTime = 0;
+
 app.get('/announcements', async (req, res) => {
+  if (Date.now() - announcementCacheTime < 60000 && announcementCache) {
+    return res.json({ data: await encryptClientResponse(announcementCache) });
+  }
   const keys = dbList('announcements');
   const list = keys.map(k => dbGet('announcements', k)).filter(Boolean).sort((a,b) => b.created - a.created);
+  announcementCache = list;
+  announcementCacheTime = Date.now();
   const enc = await encryptClientResponse(list);
   res.json({ data: enc });
 });
