@@ -619,46 +619,74 @@ app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   const count = parseInt(req.query.count) || 10;
   const offset = parseInt(req.query.offset) || 0;
-  const engine = req.query.engine || 'duckduckgo'; // можно выбрать: google, bing, yandex, baidu, duckduckgo, ecosia
+  const engine = req.query.engine || 'duckduckgo';
 
   if (!query) {
     return res.status(400).json({ error: 'Missing query parameter "q"' });
   }
 
+  const cacheKey = `${engine}:${query}:${count}:${offset}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached) {
+    console.log('📦 Search cache hit for', query);
+    return res.json(cached);
+  }
+
+  const OPENSERP_URL = process.env.OPENSERP_URL || 'https://skymutant.cc.cd/openserp';
 
   try {
-    // OpenSERP использует пагинацию через параметр start
-    const openserpUrl = `${OPENSERP_URL}/${engine}/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}`;
-    
-    const response = await fetch(openserpUrl);
+    // Используем megasearch, если указано несколько движков, иначе обычный
+    let url;
+    if (engine === 'mega') {
+      // Можно сделать выбор движков по умолчанию
+      const engines = ['duckduckgo', 'google', 'bing'];
+      url = `${OPENSERP_URL}/mega/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}&engines=${engines.join(',')}`;
+    } else {
+      url = `${OPENSERP_URL}/${engine}/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}`;
+    }
+
+    const response = await fetch(url);
     if (!response.ok) {
+      // Если 429, попробуем fallback на DuckDuckGo
+      if (response.status === 429 && engine !== 'duckduckgo') {
+        console.warn('⚠️ Rate limit on', engine, 'fallback to duckduckgo');
+        const fallbackUrl = `${OPENSERP_URL}/duckduckgo/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}`;
+        const fallbackRes = await fetch(fallbackUrl);
+        if (!fallbackRes.ok) throw new Error(`Fallback HTTP ${fallbackRes.status}`);
+        const fallbackData = await fallbackRes.json();
+        return res.json(formatSearchResponse(query, fallbackData, offset));
+      }
       const errorText = await response.text();
       console.error('OpenSERP error:', response.status, errorText);
       return res.status(response.status).json({ error: 'Search engine error' });
     }
 
     const data = await response.json();
-
-    // Форматируем ответ так же, как было в Brave API, чтобы search.html не менять
-    const results = data.results?.map(item => ({
-      title: item.title || '',
-      url: item.url || '',
-      description: item.snippet || item.description || '',
-      icon: item.favicon || `https://www.google.com/s2/favicons?domain=${item.domain || new URL(item.url).hostname}&sz=32`
-    })) || [];
-
-    res.json({
-      query,
-      results,
-      total: results.length, // OpenSERP не возвращает общее количество, используем длину массива
-      nextOffset: offset + results.length
-    });
+    const formatted = formatSearchResponse(query, data, offset);
+    searchCache.set(cacheKey, formatted);
+    res.json(formatted);
 
   } catch (err) {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+function formatSearchResponse(query, data, offset) {
+  const results = data.results?.map(item => ({
+    title: item.title || '',
+    url: item.url || '',
+    description: item.snippet || item.description || '',
+    icon: item.favicon || `https://www.google.com/s2/favicons?domain=${item.domain || new URL(item.url).hostname}&sz=32`
+  })) || [];
+
+  return {
+    query,
+    results,
+    total: results.length,
+    nextOffset: offset + results.length
+  };
+}
 
 // ========== WebSocket (мессенджер) ==========
 const server = http.createServer(app);
