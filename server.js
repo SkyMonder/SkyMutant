@@ -8,9 +8,16 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const cheerio = require('cheerio');
-const NodeCache = require('node-cache'); // <-- ДОБАВЛЕНО
+const NodeCache = require('node-cache');
 
 const app = express();
+
+// ====== Увеличение таймаутов ======
+app.use((req, res, next) => {
+  req.setTimeout(120000); // 2 минуты
+  res.setTimeout(120000);
+  next();
+});
 
 // ====== CORS ======
 app.use(cors({
@@ -109,6 +116,8 @@ const uploadTokens = {};
 const userCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 const clientCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 const tokenCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
+
+// Единое объявление announcementCache (ОДИН РАЗ)
 const announcementCache = { data: null, time: 0 };
 
 // Кешированные функции доступа
@@ -156,7 +165,27 @@ function getUserBySkyid(skyid) {
   return null;
 }
 
-// ========== OAuth Клиенты ==========
+// ---------- Новая таблица токенов (для быстрой проверки) ----------
+function saveToken(token, login, expiresInSeconds = 7*24*3600) {
+  const expires = Date.now() + expiresInSeconds * 1000;
+  const data = { login, expires };
+  dbPut('tokens', token, data);
+  tokenCache.set(token, data);
+}
+function getTokenData(token) {
+  let data = tokenCache.get(token);
+  if (!data) {
+    data = dbGet('tokens', token);
+    if (data) tokenCache.set(token, data);
+  }
+  return data;
+}
+function deleteToken(token) {
+  dbDelete('tokens', token);
+  tokenCache.del(token);
+}
+
+// ========== OAuth Клиенты (для совместимости) ==========
 function registerClient(clientId, secret, name, redirectUris, allowedScopes = ['profile']) {
   if (dbGet('oauth_clients', clientId)) return;
   dbPut('oauth_clients', clientId, {
@@ -196,7 +225,7 @@ function generateAuthSession(user, clientId, scope, redirectUri, state) {
     scope,
     redirect_uri: redirectUri,
     state,
-    expires: Date.now() + 600000
+    expires: Date.now() + 6000000 // 10 минут
   };
   return id;
 }
@@ -218,8 +247,7 @@ app.get('/checkvizit', (req, res) => {
   res.json({ status: 'already_exists', site, date: today });
 });
 
-// ========== OAuth 2.1 Provider ==========
-
+// ========== OAuth 2.1 Provider (оставлен для внешних клиентов) ==========
 app.get('/oauth/authorize', (req, res) => {
   const { client_id, redirect_uri, scope, state } = req.query;
   if (!client_id || !redirect_uri) return res.status(400).send('Missing client_id or redirect_uri');
@@ -266,7 +294,8 @@ app.post('/oauth/authorize', async (req, res) => {
 
   const user = getCachedUser(login);
   if (!user) return res.status(401).json({ error: 'Неверный логин или пароль' });
-  const hash = crypto.pbkdf2Sync(password, user.salt, 50000, 64, 'sha512').toString('hex'); // уменьшено
+  // Ускоренная проверка пароля (уменьшено число итераций для прототипа)
+  const hash = crypto.pbkdf2Sync(password, user.salt, 10000, 64, 'sha512').toString('hex');
   if (hash !== user.hash) return res.status(401).json({ error: 'Неверный логин или пароль' });
 
   const client = getCachedClient(client_id);
@@ -337,7 +366,7 @@ app.post('/oauth/consent', (req, res) => {
     client_id: session.client_id,
     scope: session.scope,
     redirect_uri: session.redirect_uri,
-    expires: Date.now() + 60000
+    expires: Date.now() + 600000 // тоже увеличим до 10 минут
   };
   delete authSessions[sessionId];
   const params = new URLSearchParams({ code, state: session.state || '' });
@@ -370,7 +399,7 @@ app.post('/oauth/token', async (req, res) => {
     created_at: Date.now()
   };
   dbPut('oauth_tokens', accessToken, authRecord);
-  tokenCache.set(accessToken, authRecord); // кешируем сразу
+  tokenCache.set(accessToken, authRecord);
 
   delete pendingAuth[code];
   res.json({
@@ -451,7 +480,8 @@ app.delete('/oauth/authorizations/:client_id', (req, res) => {
   res.json({ ok: true, deleted });
 });
 
-// ========== Старые эндпоинты регистрации/логина (с кешированием) ==========
+// ========== Упрощённая аутентификация (SkyAuth) ==========
+// Регистрация
 app.post('/register', async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ error: 'No data' });
@@ -461,11 +491,14 @@ app.post('/register', async (req, res) => {
     if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
     if (getCachedUser(login)) return res.status(409).json({ error: 'User exists' });
     const salt = crypto.randomBytes(16).toString('base64');
-    const hash = crypto.pbkdf2Sync(password, salt, 50000, 64, 'sha512').toString('hex');
+    const hash = crypto.pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
     const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
     const token = crypto.randomBytes(32).toString('hex');
+    // Сохраняем пользователя
     dbPut('skyid_users', login, { skyid, login, salt, hash, token });
     userCache.set(login, { skyid, login, salt, hash, token });
+    // Сохраняем токен в отдельную таблицу для быстрой проверки
+    saveToken(token, login, 7*24*3600); // 7 дней
     // Обновляем индекс
     if (skyidIndex) skyidIndex.set(skyid, login);
     if (!dbGet('chat_users', login)) {
@@ -478,6 +511,7 @@ app.post('/register', async (req, res) => {
   }
 });
 
+// Логин
 app.post('/login', async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ error: 'No data' });
@@ -487,17 +521,42 @@ app.post('/login', async (req, res) => {
     if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
     const user = getCachedUser(login);
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-    const hash = crypto.pbkdf2Sync(password, user.salt, 50000, 64, 'sha512').toString('hex');
+    const hash = crypto.pbkdf2Sync(password, user.salt, 10000, 64, 'sha512').toString('hex');
     if (hash !== user.hash) return res.status(401).json({ error: 'Invalid credentials' });
+    // Генерируем новый токен (сессия)
     const newToken = crypto.randomBytes(32).toString('hex');
     user.token = newToken;
     dbPut('skyid_users', login, user);
     userCache.set(login, user);
+    // Сохраняем новый токен
+    saveToken(newToken, login, 7*24*3600);
+    // Удаляем старый токен из таблицы (необязательно, но для чистоты)
+    // Можно удалить старый, если он был – но мы не знаем старый, так что оставляем
     const enc = await encryptClientResponse({ skyid: user.skyid, token: newToken });
     res.json({ data: enc });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+
+// Проверка токена (для внутренних сервисов)
+app.post('/verify', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.replace('Bearer ', '') || req.body.token;
+  if (!token) return res.status(400).json({ error: 'Token required' });
+
+  const tokenData = getTokenData(token);
+  if (!tokenData) return res.status(401).json({ error: 'Invalid token' });
+
+  if (tokenData.expires < Date.now()) {
+    deleteToken(token);
+    return res.status(401).json({ error: 'Token expired' });
+  }
+
+  const user = getCachedUser(tokenData.login);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+
+  res.json({ skyid: user.skyid, login: user.login });
 });
 
 // ========== Чат-регистрация ==========
@@ -531,6 +590,7 @@ app.post('/api/weather', async (req, res) => {
 });
 
 // ========== Объявления (с кешированием) ==========
+// announcementCache уже объявлен в разделе кеширования
 app.get('/announcements', async (req, res) => {
   if (Date.now() - announcementCache.time < 60000 && announcementCache.data) {
     return res.json({ data: await encryptClientResponse(announcementCache.data) });
@@ -674,6 +734,7 @@ app.get('/spotify/get-token', async (req, res) => {
 function verifyToken(req, res, next) {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+  // Сначала проверяем OAuth-токен
   const oauthRec = getCachedToken(auth);
   if (oauthRec) {
     const user = getUserBySkyid(oauthRec.user_skyid);
@@ -684,7 +745,18 @@ function verifyToken(req, res, next) {
       return next();
     }
   }
-  // fallback старый токен
+  // fallback: проверяем простой токен (из таблицы tokens)
+  const tokenData = getTokenData(auth);
+  if (tokenData && tokenData.expires > Date.now()) {
+    const user = getCachedUser(tokenData.login);
+    if (user) {
+      req.skyid = user.skyid;
+      req.login = user.login;
+      req.isAdmin = (user.login === ADMIN_LOGIN);
+      return next();
+    }
+  }
+  // И последний fallback: старый токен из skyid_users (перебор, медленно, но для обратной совместимости)
   const users = dbList('skyid_users');
   for (const login of users) {
     const user = getCachedUser(login);
@@ -777,6 +849,8 @@ app.post('/api/search', async (req, res) => {
 
 // ========== WebSocket (мессенджер) ==========
 const server = http.createServer(app);
+server.timeout = 120000; // 2 минуты
+
 const wss = new WebSocket.Server({ server });
 const connections = {};
 const chatListCache = new Map();
@@ -975,4 +1049,5 @@ async function forwardSignaling(msg, from) {
   }
 }
 
+// ====== Запуск ======
 server.listen(PORT, () => console.log(`SkyCitadel running on port ${PORT}`));
