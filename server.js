@@ -48,6 +48,7 @@ const CLIENT_SECRET = "BLx5Vp7U1c8dR2mQkG4fJ6yA9tC3bF0zH7iL2nM5oP8=";
 const CLIENT_KEY = Buffer.from(CLIENT_SECRET, 'base64');
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 let STORAGE_KEY = Buffer.from(process.env.STORAGE_KEY_HEX || crypto.randomBytes(32).toString('hex'), 'hex');
+const OPENSERP_URL = process.env.OPENSERP_URL || 'https://skymutant.cc.cd/openserp';
 
 // ---------- Асинхронная файловая БД ----------
 const DATA_DIR = path.join(__dirname, 'data');
