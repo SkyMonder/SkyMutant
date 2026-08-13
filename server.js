@@ -11,7 +11,6 @@ const multer = require('multer');
 const cheerio = require('cheerio');
 const NodeCache = require('node-cache');
 const jwt = require('jsonwebtoken');
-const webpush = require('web-push');
 
 const app = express();
 
@@ -26,7 +25,8 @@ app.use((req, res, next) => {
   const start = Date.now();
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} started`);
   res.on('finish', () => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} finished in ${Date.now() - start}ms`);
+    const duration = Date.now() - start;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} finished in ${duration}ms`);
   });
   next();
 });
@@ -48,20 +48,7 @@ const CLIENT_SECRET = "BLx5Vp7U1c8dR2mQkG4fJ6yA9tC3bF0zH7iL2nM5oP8=";
 const CLIENT_KEY = Buffer.from(CLIENT_SECRET, 'base64');
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 let STORAGE_KEY = Buffer.from(process.env.STORAGE_KEY_HEX || crypto.randomBytes(32).toString('hex'), 'hex');
-
-// ====== VAPID для Push-уведомлений ======
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(
-    'mailto:admin@skycitadel.cc.cd',
-    VAPID_PUBLIC_KEY,
-    VAPID_PRIVATE_KEY
-  );
-  console.log('✅ VAPID настроен');
-} else {
-  console.warn('⚠️ VAPID ключи не заданы, push-уведомления не будут работать');
-}
+const OPENSERP_URL = process.env.OPENSERP_URL || 'https://skymutant.cc.cd/openserp';
 
 // ---------- Асинхронная файловая БД ----------
 const DATA_DIR = path.join(__dirname, 'data');
@@ -175,6 +162,7 @@ const uploadTokens = {};
 
 // ========== КЕШИРОВАНИЕ ==========
 const userCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
+const searchCache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 минут
 const tokenCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 const announcementCache = { data: null, time: 0 };
 
@@ -240,7 +228,7 @@ app.get('/checkvizit', async (req, res) => {
   res.json({ status: 'already_exists', site, date: today });
 });
 
-// ========== Аутентификация (JWT) ==========
+// ========== Аутентификация (только JWT) ==========
 app.post('/register', async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ error: 'No data' });
@@ -302,6 +290,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
+// Проверка JWT (для сервисов)
 app.post('/verify', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace('Bearer ', '') || req.body.token;
@@ -326,93 +315,18 @@ app.post('/verify', async (req, res) => {
   res.json({ skyid: user.skyid, login: user.login });
 });
 
-// ========== Push-уведомления ==========
-app.post('/api/push/subscribe', async (req, res) => {
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const user = await getCachedUser(auth);
-  if (!user) return res.status(401).json({ error: 'Invalid user' });
-  const { subscription } = req.body;
-  if (!subscription) return res.status(400).json({ error: 'Subscription required' });
-
-  const existing = await dbGet('push_subscriptions', user.login) || [];
-  const filtered = existing.filter(sub => sub.endpoint !== subscription.endpoint);
-  filtered.push(subscription);
-  await dbPut('push_subscriptions', user.login, filtered);
-  res.json({ ok: true });
-});
-
-app.post('/api/push/unsubscribe', async (req, res) => {
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  const user = await getCachedUser(auth);
-  if (!user) return res.status(401).json({ error: 'Invalid user' });
-  const { endpoint } = req.body;
-  if (!endpoint) return res.status(400).json({ error: 'Endpoint required' });
-  const subscriptions = await dbGet('push_subscriptions', user.login) || [];
-  const filtered = subscriptions.filter(sub => sub.endpoint !== endpoint);
-  await dbPut('push_subscriptions', user.login, filtered);
-  res.json({ ok: true });
-});
-
-// Функция отправки push (используется внутри)
-async function sendPushNotification(login, payload) {
-  if (!VAPID_PUBLIC_KEY) return;
-  const subscriptions = await dbGet('push_subscriptions', login) || [];
-  if (!subscriptions.length) return;
-
-  const notification = {
-    title: payload.title || 'SkyCitadel',
-    body: payload.body || '',
-    icon: payload.icon || '/favicon.ico',
-    data: { url: payload.url || '/' }
-  };
-
-  for (const sub of subscriptions) {
-    try {
-      await webpush.sendNotification(sub, JSON.stringify(notification));
-    } catch (err) {
-      console.warn('Push error:', err.message);
-      if (err.statusCode === 410 || err.statusCode === 404) {
-        const updated = subscriptions.filter(s => s.endpoint !== sub.endpoint);
-        await dbPut('push_subscriptions', login, updated);
-      }
-    }
-  }
-}
-
-// ========== Чат-регистрация (старые эндпоинты для обратной совместимости) ==========
+// ========== Чат-регистрация ==========
 app.post('/chat/register', async (req, res) => {
   const { login, salt } = req.body;
   if (!login || !salt) return res.status(400).json({ error: 'login and salt required' });
-  // Проверяем, есть ли пользователь в основной БД, если нет — создаём
-  const user = await getCachedUser(login);
-  if (!user) {
-    // Если пользователь не зарегистрирован в SkyID, создаём заглушку
-    const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
-    await dbPut('skyid_users', login, { skyid, login, salt, hash: 'dummy', token: 'dummy' });
-    userCache.set(login, { skyid, login, salt, hash: 'dummy', token: 'dummy' });
-  }
-  // Создаём запись в chat_users
   if (await dbGet('chat_users', login)) return res.status(409).json({ error: 'User exists' });
   await dbPut('chat_users', login, { salt, name: login, avatar: '', status: 'online' });
   res.json({ ok: true });
 });
-
 app.get('/chat/login_salt', async (req, res) => {
   const login = req.query.login;
   if (!login) return res.status(400).json({ error: 'login required' });
-  // Сначала ищем в chat_users, если нет — пробуем skyid_users
-  let user = await dbGet('chat_users', login);
-  if (!user) {
-    const skyUser = await getCachedUser(login);
-    if (skyUser) {
-      // Если есть в skyid_users, но нет в chat_users — создаём
-      const salt = skyUser.salt;
-      await dbPut('chat_users', login, { salt, name: login, avatar: '', status: 'online' });
-      user = { salt };
-    }
-  }
+  const user = await dbGet('chat_users', login);
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ salt: user.salt });
 });
@@ -430,6 +344,68 @@ app.post('/api/weather', async (req, res) => {
   const enc = await encryptClientResponse(answer);
   res.json({ data: enc });
 });
+
+const webpush = require('web-push');
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    'mailto:skymonder@yandex.ru',
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+} else {
+  console.warn('⚠️ VAPID ключи не заданы, push-уведомления не будут работать');
+}
+
+// ====== PUSH ======
+app.post('/api/push/subscribe', verifyToken, async (req, res) => {
+  const { subscription } = req.body;
+  if (!subscription) return res.status(400).json({ error: 'Subscription required' });
+  const user = await getCachedUser(req.login);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+  const existing = dbGet('push_subscriptions', req.login) || [];
+  const filtered = existing.filter(sub => sub.endpoint !== subscription.endpoint);
+  filtered.push(subscription);
+  dbPut('push_subscriptions', req.login, filtered);
+  res.json({ ok: true });
+});
+
+app.post('/api/push/unsubscribe', verifyToken, async (req, res) => {
+  const { endpoint } = req.body;
+  if (!endpoint) return res.status(400).json({ error: 'Endpoint required' });
+  const subscriptions = dbGet('push_subscriptions', req.login) || [];
+  const filtered = subscriptions.filter(sub => sub.endpoint !== endpoint);
+  dbPut('push_subscriptions', req.login, filtered);
+  res.json({ ok: true });
+});
+
+async function sendPushNotification(login, payload) {
+  if (!VAPID_PUBLIC_KEY) return;
+  const subscriptions = dbGet('push_subscriptions', login) || [];
+  if (!subscriptions.length) return;
+  const notification = {
+    title: payload.title || 'SkyCitadel',
+    body: payload.body || '',
+    icon: payload.icon || '/favicon.ico',
+    data: { url: payload.url || '/' }
+  };
+  for (const sub of subscriptions) {
+    try {
+      await webpush.sendNotification(sub, JSON.stringify(notification));
+    } catch (err) {
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        const updated = subscriptions.filter(s => s.endpoint !== sub.endpoint);
+        dbPut('push_subscriptions', login, updated);
+      }
+    }
+  }
+}
+
+// Пример: отправка уведомления при новом сообщении (интегрировать в WebSocket)
+// В обработчике handleSendMessage после сохранения сообщения:
+// await sendPushNotification(получатель, { title: 'Новое сообщение', body: `${отправитель}: ${текст}`, url: `/messenger` });
 
 // ========== Объявления ==========
 app.get('/announcements', async (req, res) => {
@@ -699,9 +675,49 @@ app.post('/admin/unban', verifyToken, adminRequired, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ========== Поиск (заглушка) ==========
-app.post('/api/search', async (req, res) => {
-  res.json({ data: await encryptClientResponse({ query: '', results: [] }) });
+app.get('/api/search', async (req, res) => {
+  const query = req.query.q;
+  const count = parseInt(req.query.count) || 10;
+  const offset = parseInt(req.query.offset) || 0;
+  const engine = req.query.engine || 'duckduckgo';
+
+  if (!query) {
+    return res.status(400).json({ error: 'Missing query parameter "q"' });
+  }
+
+
+
+  try {
+    const openserpUrl = `${OPENSERP_URL}/${engine}/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}`;
+    console.log('Search request:', openserpUrl);
+
+    const response = await fetch(openserpUrl);
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('OpenSERP error:', response.status, errorText);
+      return res.status(response.status).json({ error: 'Search engine error' });
+    }
+
+    const data = await response.json();
+
+    const results = data.results?.map(item => ({
+      title: item.title || '',
+      url: item.url || '',
+      description: item.snippet || item.description || '',
+      icon: item.favicon || `https://www.google.com/s2/favicons?domain=${item.domain || new URL(item.url).hostname}&sz=32`
+    })) || [];
+
+    res.json({
+      query,
+      results,
+      total: results.length,
+      nextOffset: offset + results.length
+    });
+
+  } catch (err) {
+    console.error('Search error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // ========== WebSocket (мессенджер) ==========
@@ -805,17 +821,16 @@ async function handleSendMessage(user, chatId, text, file) {
       connections[m].send(JSON.stringify({ type: 'message', chatId, ...message }));
     }
   }
-  // Push-уведомления для тех, кто не в сети
-  for (const m of chat.members) {
-    if (m !== user && !connections[m] && !chat.blocked?.includes(m)) {
-      await sendPushNotification(m, {
-        title: `Новое сообщение от ${user}`,
-        body: text || '📎 Файл',
-        url: '/?section=messenger'
-      });
-    }
+  // Отправляем push получателю (если он не в сети)
+  if (!connections[otherUser]) {
+    await sendPushNotification(otherUser, {
+      title: `Новое сообщение от ${user}`,
+      body: text,
+      url: `/?section=messenger&chat=${chatId}`
+    });
   }
 }
+
 async function handleEditMessage(user, chatId, messageId, newText) {
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
