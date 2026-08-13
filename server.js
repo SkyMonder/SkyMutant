@@ -833,7 +833,16 @@ async function handleSendMessage(user, chatId, text, file) {
       connections[m].send(JSON.stringify({ type: 'message', chatId, ...message }));
     }
   }
+  // Отправляем push получателю (если он не в сети)
+  if (!connections[otherUser]) {
+    await sendPushNotification(otherUser, {
+      title: `Новое сообщение от ${user}`,
+      body: text,
+      url: `/?section=messenger&chat=${chatId}`
+    });
+  }
 }
+
 async function handleEditMessage(user, chatId, messageId, newText) {
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
