@@ -345,6 +345,80 @@ app.post('/api/weather', async (req, res) => {
   res.json({ data: enc });
 });
 
+const webpush = require('web-push');
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    'mailto:admin@skycitadel.cc.cd',
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+} else {
+  console.warn('⚠️ VAPID ключи не заданы, push-уведомления не будут работать');
+}
+
+// ====== PUSH ======
+// Сохранение подписки
+app.post('/api/push/subscribe', verifyToken, async (req, res) => {
+  const { subscription } = req.body;
+  if (!subscription) return res.status(400).json({ error: 'Subscription required' });
+
+  const user = await getCachedUser(req.login);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+
+  // Сохраняем подписку в БД (привязываем к login)
+  const existing = dbGet('push_subscriptions', req.login) || [];
+  // Удаляем старую подписку с таким же endpoint (если есть)
+  const filtered = existing.filter(sub => sub.endpoint !== subscription.endpoint);
+  filtered.push(subscription);
+  dbPut('push_subscriptions', req.login, filtered);
+
+  res.json({ ok: true });
+});
+
+// Удаление подписки (при выходе или при отписке)
+app.post('/api/push/unsubscribe', verifyToken, async (req,res) => {
+  const { endpoint } = req.body;
+  if (!endpoint) return res.status(400).json({ error: 'Endpoint required' });
+  const subscriptions = dbGet('push_subscriptions', req.login) || [];
+  const filtered = subscriptions.filter(sub => sub.endpoint !== endpoint);
+  dbPut('push_subscriptions', req.login, filtered);
+  res.json({ ok: true });
+});
+
+// Отправка уведомления (используется внутри системы)
+async function sendPushNotification(login, payload) {
+  if (!VAPID_PUBLIC_KEY) return;
+  const subscriptions = dbGet('push_subscriptions', login) || [];
+  if (!subscriptions.length) return;
+
+  const notification = {
+    title: payload.title || 'SkyCitadel',
+    body: payload.body || '',
+    icon: payload.icon || '/favicon.ico',
+    data: { url: payload.url || '/' }
+  };
+
+  for (const sub of subscriptions) {
+    try {
+      await webpush.sendNotification(sub, JSON.stringify(notification));
+    } catch (err) {
+      console.warn('Ошибка отправки push:', err.message);
+      // Если подписка невалидна — удаляем
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        const updated = subscriptions.filter(s => s.endpoint !== sub.endpoint);
+        dbPut('push_subscriptions', login, updated);
+      }
+    }
+  }
+}
+
+// Пример: отправка уведомления при новом сообщении (интегрировать в WebSocket)
+// В обработчике handleSendMessage после сохранения сообщения:
+// await sendPushNotification(получатель, { title: 'Новое сообщение', body: `${отправитель}: ${текст}`, url: `/messenger` });
+
 // ========== Объявления ==========
 app.get('/announcements', async (req, res) => {
   if (Date.now() - announcementCache.time < 60000 && announcementCache.data) {
