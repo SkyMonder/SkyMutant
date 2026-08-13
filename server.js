@@ -351,7 +351,7 @@ const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails(
-    'mailto:admin@skycitadel.cc.cd',
+    'mailto:skymonder@yandex.ru',
     VAPID_PUBLIC_KEY,
     VAPID_PRIVATE_KEY
   );
@@ -360,26 +360,19 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
 }
 
 // ====== PUSH ======
-// Сохранение подписки
 app.post('/api/push/subscribe', verifyToken, async (req, res) => {
   const { subscription } = req.body;
   if (!subscription) return res.status(400).json({ error: 'Subscription required' });
-
   const user = await getCachedUser(req.login);
   if (!user) return res.status(401).json({ error: 'User not found' });
-
-  // Сохраняем подписку в БД (привязываем к login)
   const existing = dbGet('push_subscriptions', req.login) || [];
-  // Удаляем старую подписку с таким же endpoint (если есть)
   const filtered = existing.filter(sub => sub.endpoint !== subscription.endpoint);
   filtered.push(subscription);
   dbPut('push_subscriptions', req.login, filtered);
-
   res.json({ ok: true });
 });
 
-// Удаление подписки (при выходе или при отписке)
-app.post('/api/push/unsubscribe', verifyToken, async (req,res) => {
+app.post('/api/push/unsubscribe', verifyToken, async (req, res) => {
   const { endpoint } = req.body;
   if (!endpoint) return res.status(400).json({ error: 'Endpoint required' });
   const subscriptions = dbGet('push_subscriptions', req.login) || [];
@@ -388,25 +381,20 @@ app.post('/api/push/unsubscribe', verifyToken, async (req,res) => {
   res.json({ ok: true });
 });
 
-// Отправка уведомления (используется внутри системы)
 async function sendPushNotification(login, payload) {
   if (!VAPID_PUBLIC_KEY) return;
   const subscriptions = dbGet('push_subscriptions', login) || [];
   if (!subscriptions.length) return;
-
   const notification = {
     title: payload.title || 'SkyCitadel',
     body: payload.body || '',
     icon: payload.icon || '/favicon.ico',
     data: { url: payload.url || '/' }
   };
-
   for (const sub of subscriptions) {
     try {
       await webpush.sendNotification(sub, JSON.stringify(notification));
     } catch (err) {
-      console.warn('Ошибка отправки push:', err.message);
-      // Если подписка невалидна — удаляем
       if (err.statusCode === 410 || err.statusCode === 404) {
         const updated = subscriptions.filter(s => s.endpoint !== sub.endpoint);
         dbPut('push_subscriptions', login, updated);
