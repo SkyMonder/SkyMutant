@@ -31,8 +31,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// ====== СТАТИКА ======
+// ====== СТАТИКА (для остальных файлов) ======
 app.use(express.static('public'));
+
+// ====== ЯВНЫЙ МАРШРУТ ДЛЯ ban.html (из корня) ======
+app.get('/ban.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'ban.html'));
+});
 
 // ====== ФУНКЦИЯ ПОЛУЧЕНИЯ IP (учитывает Cloudflare) ======
 function getClientIP(req) {
@@ -55,7 +60,6 @@ async function loadBannedIps() {
     const content = await fs.readFile(BANNED_IPS_FILE, 'utf-8');
     return JSON.parse(content);
   } catch (e) {
-    // Если файла нет или он повреждён, возвращаем пустой объект
     return {};
   }
 }
@@ -801,7 +805,6 @@ app.post('/report_violation', async (req, res) => {
 
   if (violations.count >= MAX_VIOLATIONS) {
     const lastReport = violations.reports[violations.reports.length - 1];
-    // Записываем в единый файл banned_ips.json
     const banned = await loadBannedIps();
     banned[cleanIp] = {
       bannedAt: Date.now(),
