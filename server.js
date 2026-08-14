@@ -945,4 +945,50 @@ async function forwardSignaling(msg, from) {
   console.log(`🔑 Администратор ${adminLogin} создан! Сохраните пароль: ${adminPassword}`);
 })();
 
+// ====== ПОИСК (OpenSERP) ======
+app.get('/api/search', async (req, res) => {
+  const query = req.query.q;
+  const count = parseInt(req.query.count) || 10;
+  const offset = parseInt(req.query.offset) || 0;
+  const engine = req.query.engine || 'duckduckgo';
+
+  if (!query) {
+    return res.status(400).json({ error: 'Missing query parameter "q"' });
+  }
+
+  const OPENSERP_URL = process.env.OPENSERP_URL || 'https://skymutant.cc.cd/openserp';
+
+  try {
+    const openserpUrl = `${OPENSERP_URL}/${engine}/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}`;
+    console.log('Search request:', openserpUrl);
+
+    const response = await fetch(openserpUrl);
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('OpenSERP error:', response.status, errorText);
+      return res.status(response.status).json({ error: 'Search engine error' });
+    }
+
+    const data = await response.json();
+
+    const results = data.results?.map(item => ({
+      title: item.title || '',
+      url: item.url || '',
+      description: item.snippet || item.description || '',
+      icon: item.favicon || `https://www.google.com/s2/favicons?domain=${item.domain || new URL(item.url).hostname}&sz=32`
+    })) || [];
+
+    res.json({
+      query,
+      results,
+      total: results.length,
+      nextOffset: offset + results.length
+    });
+
+  } catch (err) {
+    console.error('Search error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
