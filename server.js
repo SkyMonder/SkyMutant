@@ -32,7 +32,7 @@ app.use((req, res, next) => {
 });
 
 // ====== СТАТИКА ======
-app.use(express.static('public')); // теперь admin.html доступен по /admin.html
+app.use(express.static('public'));
 
 // ====== CORS ======
 app.use(cors({
@@ -664,7 +664,7 @@ app.get('/admin/users', isAdmin, async (req, res) => {
 app.get('/admin/stats', isAdmin, async (req, res) => {
   try {
     const users = await dbList('skyid_users');
-    const videos = await dbList('videos') || []; // если есть папка videos в SkyMutant
+    const videos = await dbList('videos') || [];
     const announcements = await dbList('announcements');
     res.json({
       users: users.length,
@@ -685,11 +685,8 @@ app.delete('/admin/user/:login', isAdmin, async (req, res) => {
   try {
     const user = await getCachedUser(login);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    // Удаляем из skyid_users
     await dbDelete('skyid_users', login);
-    // Удаляем из чатов (если есть)
     await dbDelete('chat_users', login);
-    // Удаляем токены
     const tokens = await dbList('tokens');
     for (const tok of tokens) {
       const data = await dbGet('tokens', tok);
@@ -697,7 +694,6 @@ app.delete('/admin/user/:login', isAdmin, async (req, res) => {
         await dbDelete('tokens', tok);
       }
     }
-    // Сброс кеша
     userCache.del(login);
     if (skyidIndex) skyidIndex.delete(user.skyid);
     res.json({ ok: true });
@@ -714,12 +710,20 @@ const wss = new WebSocket.Server({ server });
 const connections = {};
 const chatListCache = new Map();
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   let currentUser = null;
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  if (dbGet('banned_ips', ip)) {
-    ws.send(JSON.stringify({ type: 'error', message: 'Ваш IP заблокирован за нарушения.' }));
-    ws.close();
+
+  // Проверка бана (асинхронная)
+  (async () => {
+    const banned = await dbGet('banned_ips', ip);
+    if (banned) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Ваш IP заблокирован за нарушения.' }));
+      ws.close();
+      return;
+    }
+  })();
+
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch (e) { return; }
@@ -913,25 +917,20 @@ async function forwardSignaling(msg, from) {
     connections[other].send(JSON.stringify({ ...msg, from }));
   }
 }
+
 // ====== ИНИЦИАЛИЗАЦИЯ АДМИНИСТРАТОРА ======
 (async function initAdmin() {
   const adminLogin = process.env.ADMIN_LOGIN || 'SkyMonder';
   const adminPassword = process.env.ADMIN_PASSWORD;
-  
-  // Если пароль не задан в env, пропускаем (или генерируем, но лучше вывести предупреждение)
   if (!adminPassword) {
     console.warn('⚠️ ADMIN_PASSWORD не задан в переменных окружения. Администратор не будет создан автоматически.');
     return;
   }
-
-  // Проверяем, существует ли пользователь
   const existing = await getCachedUser(adminLogin);
   if (existing) {
     console.log(`✅ Администратор ${adminLogin} уже существует.`);
     return;
   }
-
-  // Создаём администратора
   const salt = crypto.randomBytes(16).toString('base64');
   const hash = await new Promise((resolve, reject) => {
     crypto.pbkdf2(adminPassword, salt, 10000, 64, 'sha512', (err, derivedKey) => {
@@ -941,11 +940,9 @@ async function forwardSignaling(msg, from) {
   });
   const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
   const token = crypto.randomBytes(32).toString('hex');
-
   await dbPut('skyid_users', adminLogin, { skyid, login: adminLogin, salt, hash, token });
   userCache.set(adminLogin, { skyid, login: adminLogin, salt, hash, token });
   if (skyidIndex) skyidIndex.set(skyid, adminLogin);
-  
   console.log(`🔑 Администратор ${adminLogin} создан! Сохраните пароль: ${adminPassword}`);
 })();
 
@@ -955,40 +952,32 @@ app.get('/api/search', async (req, res) => {
   const count = parseInt(req.query.count) || 10;
   const offset = parseInt(req.query.offset) || 0;
   const engine = req.query.engine || 'duckduckgo';
-
   if (!query) {
     return res.status(400).json({ error: 'Missing query parameter "q"' });
   }
-
   const OPENSERP_URL = process.env.OPENSERP_URL || 'https://skymutant.cc.cd/openserp';
-
   try {
     const openserpUrl = `${OPENSERP_URL}/${engine}/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}`;
     console.log('Search request:', openserpUrl);
-
     const response = await fetch(openserpUrl);
     if (!response.ok) {
       const errorText = await response.text();
       console.error('OpenSERP error:', response.status, errorText);
       return res.status(response.status).json({ error: 'Search engine error' });
     }
-
     const data = await response.json();
-
     const results = data.results?.map(item => ({
       title: item.title || '',
       url: item.url || '',
       description: item.snippet || item.description || '',
       icon: item.favicon || `https://www.google.com/s2/favicons?domain=${item.domain || new URL(item.url).hostname}&sz=32`
     })) || [];
-
     res.json({
       query,
       results,
       total: results.length,
       nextOffset: offset + results.length
     });
-
   } catch (err) {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -1004,13 +993,14 @@ app.get('/get_ip', (req, res) => {
 });
 
 // Репорт о нарушении
+const MAX_VIOLATIONS = 3;
 app.post('/report_violation', async (req, res) => {
   const { login, ip, text, score } = req.body;
   if (!login || !ip || !text) {
     return res.status(400).json({ error: 'Missing fields' });
   }
-
-  const violations = dbGet('violations', ip) || { count: 0, reports: [] };
+  let violations = await dbGet('violations', ip);
+  if (!violations) violations = { count: 0, reports: [] };
   violations.count += 1;
   violations.reports.push({
     login,
@@ -1019,44 +1009,35 @@ app.post('/report_violation', async (req, res) => {
     timestamp: Date.now(),
     id: Date.now() + '_' + Math.random().toString(36).slice(2,6)
   });
-  dbPut('violations', ip, violations);
-
-  // Если превышен лимит – бан
+  await dbPut('violations', ip, violations);
   if (violations.count >= MAX_VIOLATIONS) {
-    dbPut('banned_ips', ip, { bannedAt: Date.now(), reason: 'Exceeded violation limit' });
+    await dbPut('banned_ips', ip, { bannedAt: Date.now(), reason: 'Exceeded violation limit' });
   }
   res.json({ ok: true });
 });
 
 // Админ-панель: список нарушений
-app.get('/admin/violations', isAdmin, (req, res) => {
-  const ips = dbList('violations');
+app.get('/admin/violations', isAdmin, async (req, res) => {
+  const ips = await dbList('violations');
   const allReports = [];
-  ips.forEach(ip => {
-    const data = dbGet('violations', ip);
+  for (const ip of ips) {
+    const data = await dbGet('violations', ip);
     if (data && data.reports) {
       data.reports.forEach(r => {
         allReports.push({ ip, ...r });
       });
     }
-  });
+  }
   allReports.sort((a,b) => b.timestamp - a.timestamp);
   res.json(allReports);
 });
 
 // Админ-панель: разбан IP
-app.post('/admin/unban', isAdmin, (req, res) => {
+app.post('/admin/unban', isAdmin, async (req, res) => {
   const { ip } = req.body;
   if (!ip) return res.status(400).json({ error: 'IP required' });
-  dbDelete('banned_ips', ip);
-  // Опционально: очистить нарушения
-  // dbDelete('violations', ip);
+  await dbDelete('banned_ips', ip);
   res.json({ ok: true });
-});
-
-// Проверка бана при подключении WebSocket
-// В месте подключения ws:
-  // ... остальная логика
 });
 
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
