@@ -906,5 +906,40 @@ async function forwardSignaling(msg, from) {
     connections[other].send(JSON.stringify({ ...msg, from }));
   }
 }
+// ====== ИНИЦИАЛИЗАЦИЯ АДМИНИСТРАТОРА ======
+(async function initAdmin() {
+  const adminLogin = process.env.ADMIN_LOGIN || 'SkyMonder';
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  
+  // Если пароль не задан в env, пропускаем (или генерируем, но лучше вывести предупреждение)
+  if (!adminPassword) {
+    console.warn('⚠️ ADMIN_PASSWORD не задан в переменных окружения. Администратор не будет создан автоматически.');
+    return;
+  }
+
+  // Проверяем, существует ли пользователь
+  const existing = await getCachedUser(adminLogin);
+  if (existing) {
+    console.log(`✅ Администратор ${adminLogin} уже существует.`);
+    return;
+  }
+
+  // Создаём администратора
+  const salt = crypto.randomBytes(16).toString('base64');
+  const hash = await new Promise((resolve, reject) => {
+    crypto.pbkdf2(adminPassword, salt, 10000, 64, 'sha512', (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey.toString('hex'));
+    });
+  });
+  const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
+  const token = crypto.randomBytes(32).toString('hex');
+
+  await dbPut('skyid_users', adminLogin, { skyid, login: adminLogin, salt, hash, token });
+  userCache.set(adminLogin, { skyid, login: adminLogin, salt, hash, token });
+  if (skyidIndex) skyidIndex.set(skyid, adminLogin);
+  
+  console.log(`🔑 Администратор ${adminLogin} создан! Сохраните пароль: ${adminPassword}`);
+})();
 
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
