@@ -31,7 +31,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ====== СТАТИКА (для остальных файлов) ======
+// ====== СТАТИКА (для остальных файлов, если понадобится) ======
 app.use(express.static('public'));
 
 // ====== ЯВНЫЙ МАРШРУТ ДЛЯ ban.html (из корня) ======
@@ -39,18 +39,17 @@ app.get('/ban.html', (req, res) => {
   res.sendFile(path.join(__dirname, 'ban.html'));
 });
 
-// ====== ФУНКЦИЯ ПОЛУЧЕНИЯ IP (учитывает Cloudflare) ======
+// ====== ФУНКЦИЯ ПОЛУЧЕНИЯ IP ======
 function getClientIP(req) {
   const forwarded = req.headers['x-forwarded-for'];
   const ip = forwarded ? forwarded.split(',')[0].trim() : req.socket.remoteAddress;
-  return ip.split(':')[0]; // удаляем порт если есть
+  return ip.split(':')[0];
 }
 
 // ====== РАБОТА С banned_ips.json ======
 const DATA_DIR = path.join(__dirname, 'data');
 const BANNED_IPS_FILE = path.join(DATA_DIR, 'banned_ips.json');
 
-// Гарантируем существование папки data
 (async () => {
   try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) {}
 })();
@@ -68,9 +67,9 @@ async function saveBannedIps(data) {
   await fs.writeFile(BANNED_IPS_FILE, JSON.stringify(data, null, 2));
 }
 
-// ====== MIDDLEWARE: ГЛОБАЛЬНАЯ ПРОВЕРКА БАНА ======
+// ====== MIDDLEWARE: ГЛОБАЛЬНАЯ ПРОВЕРКА БАНА (ВСЕ РЕДИРЕКТ НА /ban.html) ======
 app.use(async (req, res, next) => {
-  // Пропускаем только ban.html и favicon (чтобы не было цикла)
+  // Пропускаем запросы к ban.html и favicon.ico
   if (req.path === '/ban.html' || req.path === '/favicon.ico') {
     return next();
   }
@@ -80,12 +79,13 @@ app.use(async (req, res, next) => {
   const banData = banned[ip];
 
   if (banData) {
-    // Для ВСЕХ запросов (включая API, статику и т.д.) отдаём ban.html с кодом 403
-    return res.status(403).sendFile(path.join(__dirname, 'ban.html'));
+    // РЕДИРЕКТ НА ban.html ДЛЯ ЛЮБОГО ЗАПРОСА (включая API, статику, корень)
+    return res.redirect('/ban.html');
   }
 
   next();
 });
+
 // ====== CORS ======
 app.use(cors({
   origin: '*',
@@ -104,7 +104,7 @@ const CLIENT_KEY = Buffer.from(CLIENT_SECRET, 'base64');
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 let STORAGE_KEY = Buffer.from(process.env.STORAGE_KEY_HEX || crypto.randomBytes(32).toString('hex'), 'hex');
 
-// ---------- Асинхронная файловая БД (для остальных данных) ----------
+// ---------- Асинхронная файловая БД ----------
 const listCache = new Map();
 
 async function ensureBucketDir(bucket) {
@@ -278,7 +278,7 @@ app.get('/checkvizit', async (req, res) => {
   res.json({ status: 'already_exists', site, date: today });
 });
 
-// ========== Аутентификация (только JWT) ==========
+// ========== Аутентификация ==========
 app.post('/register', async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ error: 'No data' });
@@ -344,7 +344,6 @@ app.post('/verify', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace('Bearer ', '') || req.body.token;
   if (!token) return res.status(400).json({ error: 'Token required' });
-
   const decoded = verifyJWT(token);
   if (decoded) {
     const user = await getUserBySkyid(decoded.skyid);
@@ -352,7 +351,6 @@ app.post('/verify', async (req, res) => {
       return res.json({ skyid: decoded.skyid, login: decoded.login });
     }
   }
-
   const tokenData = await getTokenData(token);
   if (!tokenData) return res.status(401).json({ error: 'Invalid token' });
   if (tokenData.expires < Date.now()) {
@@ -547,7 +545,6 @@ app.get('/spotify/get-token', async (req, res) => {
 async function verifyToken(req, res, next) {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-
   const decoded = verifyJWT(auth);
   if (decoded) {
     const user = await getUserBySkyid(decoded.skyid);
@@ -558,7 +555,6 @@ async function verifyToken(req, res, next) {
       return next();
     }
   }
-
   const tokenData = await getTokenData(auth);
   if (tokenData && tokenData.expires > Date.now()) {
     const user = await getCachedUser(tokenData.login);
@@ -569,7 +565,6 @@ async function verifyToken(req, res, next) {
       return next();
     }
   }
-
   const users = await dbList('skyid_users');
   for (const login of users) {
     const user = await getCachedUser(login);
@@ -672,10 +667,8 @@ async function isAdmin(req, res, next) {
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
   const token = authHeader.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
-
   const decoded = verifyJWT(token);
   if (!decoded || !decoded.login) return res.status(401).json({ error: 'Invalid token' });
-
   const user = await getCachedUser(decoded.login);
   if (!user || user.login !== ADMIN_LOGIN) {
     return res.status(403).json({ error: 'Forbidden: admin only' });
@@ -747,8 +740,7 @@ app.delete('/admin/user/:login', isAdmin, async (req, res) => {
 });
 
 // ========== МОДЕРАЦИЯ И БАНЫ ==========
-
-const MAX_VIOLATIONS = 1; // БАН ПОСЛЕ ПЕРВОГО НАРУШЕНИЯ
+const MAX_VIOLATIONS = 1;
 
 app.get('/get_ip', (req, res) => {
   const ip = getClientIP(req);
@@ -844,7 +836,7 @@ wss.on('connection', (ws, req) => {
     if (banned[ip]) {
       ws.send(JSON.stringify({
         type: 'error',
-        message: `Ваш IP заблокирован за нарушение: "${banned[ip].message || 'Нарушение правил'}". Для апелляции: skymonder@yandex.ru`
+        message: `Ваш IP заблокирован. Для апелляции: skymonder@yandex.ru`
       }));
       ws.close();
       return;
@@ -949,7 +941,6 @@ async function handleSendMessage(user, chatId, text, file, ip) {
     }
     return;
   }
-
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
   const message = { id: 'msg_' + Date.now(), from: user, text: text || '', time: Date.now() };
