@@ -6,74 +6,252 @@
   <title>Админ-панель SkyCitadel</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { background:#0a0f1e; color:#e0e8ff; font-family:'Segoe UI',sans-serif; padding:2rem; }
-    .container { max-width:1400px; margin:0 auto; }
-    h1 { color:#b7ceff; border-left:4px solid #5f7ecf; padding-left:1rem; margin-bottom:2rem; }
-    .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1rem; margin-bottom:2rem; }
-    .stat-card { background:#1a233a; padding:1rem; border-radius:12px; text-align:center; border:1px solid #2a3450; }
-    .stat-number { font-size:2rem; font-weight:bold; color:#b7ceff; }
-    .stat-label { font-size:0.8rem; color:#8899cc; }
-    .tabs { display:flex; gap:0.5rem; margin-bottom:1.5rem; flex-wrap:wrap; }
-    .tab { padding:0.5rem 1.5rem; background:#1a233a; border:1px solid #2a3450; border-radius:8px; cursor:pointer; }
-    .tab.active { background:#5f7ecf; border-color:#5f7ecf; }
-    .tab-content { display:none; }
-    .tab-content.active { display:block; }
-    table { width:100%; border-collapse:collapse; background:#1a233a; border-radius:12px; overflow:hidden; }
-    th, td { padding:0.7rem; text-align:left; border-bottom:1px solid #2a3450; }
-    th { background:#0d1425; color:#b7ceff; }
-    .btn { padding:0.3rem 0.8rem; border:none; border-radius:6px; cursor:pointer; font-size:0.8rem; }
-    .btn-danger { background:#c44; color:white; }
-    .btn-success { background:#2a7a2a; color:white; }
-    .btn-warning { background:#b8860b; color:white; }
-    .btn-sm { padding:0.2rem 0.6rem; font-size:0.7rem; }
-    .back-link { display:inline-block; margin-top:2rem; color:#5f7ecf; text-decoration:none; }
-    .back-link:hover { text-decoration:underline; }
-    .login-warning { background:#3a2a1a; padding:1rem; border-radius:12px; margin-bottom:1.5rem; border-left:4px solid #f48024; }
+    body {
+      background: #0a0f1e;
+      color: #e0e8ff;
+      font-family: 'Segoe UI', sans-serif;
+      padding: 2rem;
+    }
+    .container { max-width: 1400px; margin:0 auto; }
+    h1 {
+      color: #b7ceff;
+      border-left: 4px solid #5f7ecf;
+      padding-left: 1rem;
+      margin-bottom: 2rem;
+      font-weight: 300;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .stat-card {
+      background: #1a233a;
+      padding: 1rem;
+      border-radius: 12px;
+      text-align: center;
+      border: 1px solid #2a3450;
+    }
+    .stat-number {
+      font-size: 2rem;
+      font-weight: bold;
+      color: #b7ceff;
+    }
+    .stat-label {
+      font-size: 0.8rem;
+      color: #8899cc;
+    }
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .tab {
+      padding: 0.5rem 1.5rem;
+      background: #1a233a;
+      border: 1px solid #2a3450;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    .tab.active {
+      background: #5f7ecf;
+      border-color: #5f7ecf;
+    }
+    .tab:hover {
+      background: #2a3450;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #1a233a;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 0.7rem;
+      text-align: left;
+      border-bottom: 1px solid #2a3450;
+      word-break: break-word;
+    }
+    th {
+      background: #0d1425;
+      color: #b7ceff;
+      font-weight: 600;
+    }
+    .btn {
+      padding: 0.3rem 0.8rem;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      transition: 0.2s;
+    }
+    .btn:hover {
+      opacity: 0.8;
+    }
+    .btn-danger { background: #c44; color: white; }
+    .btn-success { background: #2a7a2a; color: white; }
+    .btn-warning { background: #b8860b; color: white; }
+    .btn-sm { padding: 0.2rem 0.6rem; font-size: 0.7rem; }
+    .btn-danger:hover { background: #a33; }
+    .back-link {
+      display: inline-block;
+      margin-top: 2rem;
+      color: #5f7ecf;
+      text-decoration: none;
+    }
+    .back-link:hover { text-decoration: underline; }
+    .login-warning {
+      background: #3a2a1a;
+      padding: 1rem;
+      border-radius: 12px;
+      margin-bottom: 1.5rem;
+      border-left: 4px solid #f48024;
+    }
+    .login-warning button {
+      background: #5f7ecf;
+      border: none;
+      color: white;
+      padding: 0.4rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-top: 0.5rem;
+    }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1a233a;
+      color: #e0e8ff;
+      padding: 0.8rem 2rem;
+      border-radius: 12px;
+      border: 1px solid #2a3450;
+      z-index: 100;
+      display: none;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+    }
+    .toast.error { border-color: #c44; }
+    .toast.success { border-color: #2a7a2a; }
+    .status-msg {
+      color: #8899cc;
+      padding: 1rem;
+      text-align: center;
+    }
+    .loading {
+      text-align: center;
+      color: #8899cc;
+      padding: 1rem;
+    }
+    @media (max-width: 768px) {
+      body { padding: 1rem; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      table { font-size: 0.8rem; }
+      th, td { padding: 0.4rem; }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>🛡️ Админ-панель SkyCitadel</h1>
     <div id="adminStatus"></div>
+
+    <!-- Статистика -->
     <div class="stats" id="statsContainer">
       <div class="stat-card"><div class="stat-number" id="statUsers">-</div><div class="stat-label">Пользователей</div></div>
       <div class="stat-card"><div class="stat-number" id="statVideos">-</div><div class="stat-label">Видео</div></div>
       <div class="stat-card"><div class="stat-number" id="statAnnouncements">-</div><div class="stat-label">Объявлений</div></div>
     </div>
 
-    <div class="tabs">
+    <!-- Вкладки -->
+    <div class="tabs" id="tabs">
       <button class="tab active" data-tab="users">👥 Пользователи</button>
       <button class="tab" data-tab="videos">🎬 Видео</button>
       <button class="tab" data-tab="comments">💬 Комментарии</button>
       <button class="tab" data-tab="violations">🚫 Нарушения</button>
     </div>
 
+    <!-- Содержимое вкладок -->
     <div id="tab-users" class="tab-content active">
-      <div id="usersTableWrap"><p>Загрузка...</p></div>
+      <div id="usersTableWrap"><div class="loading">Загрузка...</div></div>
     </div>
     <div id="tab-videos" class="tab-content">
-      <div id="videosTableWrap"><p>Загрузка...</p></div>
+      <div id="videosTableWrap"><div class="loading">Загрузка...</div></div>
     </div>
     <div id="tab-comments" class="tab-content">
-      <div id="commentsTableWrap"><p>Загрузка...</p></div>
+      <div id="commentsTableWrap"><div class="loading">Загрузка...</div></div>
     </div>
     <div id="tab-violations" class="tab-content">
-       <div id="violationsTableWrap"><p>Загрузка...</p></div>
+      <div id="violationsTableWrap"><div class="loading">Загрузка...</div></div>
     </div>
 
     <a href="/" class="back-link">🏰 Вернуться в крепость</a>
   </div>
 
+  <!-- Toast уведомление -->
+  <div id="toast" class="toast"></div>
+
   <script>
+    // ====== КОНФИГУРАЦИЯ ======
     const MUTANT_API = 'https://skymutant.cc.cd';
     const VIDEO_API = 'https://skymutant.cc.cd/video';
+    const SECRET_KEY_BASE64 = 'BLx5Vp7U1c8dR2mQkG4fJ6yA9tC3bF0zH7iL2nM5oP8=';
+
     let token = localStorage.getItem('skyid_token') || null;
 
-    // Проверка админа
+    // ====== ШИФРОВАНИЕ (для входа) ======
+    async function getKey() {
+      const k = Uint8Array.from(atob(SECRET_KEY_BASE64), c => c.charCodeAt(0));
+      return crypto.subtle.importKey('raw', k, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    }
+    async function encryptPayload(obj) {
+      const key = await getKey();
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const enc = new TextEncoder().encode(JSON.stringify(obj));
+      const c = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc);
+      const combo = new Uint8Array(iv.byteLength + c.byteLength);
+      combo.set(iv);
+      combo.set(new Uint8Array(c), iv.byteLength);
+      return btoa(String.fromCharCode(...combo));
+    }
+    async function decryptPayload(b64) {
+      const key = await getKey();
+      const combo = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const iv = combo.slice(0, 12);
+      const data = combo.slice(12);
+      const dec = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
+      return JSON.parse(new TextDecoder().decode(dec));
+    }
+
+    // ====== TOAST ======
+    function showToast(msg, type = '') {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.className = 'toast ' + type;
+      el.style.display = 'block';
+      clearTimeout(el._timer);
+      el._timer = setTimeout(() => { el.style.display = 'none'; }, 4000);
+    }
+
+    // ====== ПРОВЕРКА АДМИНА ======
     async function checkAdmin() {
       const statusDiv = document.getElementById('adminStatus');
       if (!token) {
-        statusDiv.innerHTML = `<div class="login-warning">⚠️ Вы не авторизованы. <button onclick="login()" class="btn btn-success">Войти как администратор</button></div>`;
+        statusDiv.innerHTML = `
+          <div class="login-warning">
+            ⚠️ Вы не авторизованы.
+            <button onclick="showLoginForm()">Войти как администратор</button>
+          </div>
+        `;
         return false;
       }
       try {
@@ -91,69 +269,77 @@
         statusDiv.innerHTML = `<div style="color:#7ebc6f;">✅ Вы вошли как администратор (${data.login})</div>`;
         return true;
       } catch (e) {
-        statusDiv.innerHTML = `<div class="login-warning">⚠️ Ошибка авторизации. <button onclick="login()" class="btn btn-success">Войти как администратор</button></div>`;
+        statusDiv.innerHTML = `
+          <div class="login-warning">
+            ⚠️ Ошибка авторизации (${e.message}).
+            <button onclick="showLoginForm()">Войти заново</button>
+          </div>
+        `;
         return false;
       }
     }
 
-    function login() {
-      const login = prompt('Логин администратора:');
-      if (!login) return;
-      const password = prompt('Пароль:');
-      if (!password) return;
-      // Используем шифрование (как в index.html)
-      const SECRET_KEY_BASE64 = 'BLx5Vp7U1c8dR2mQkG4fJ6yA9tC3bF0zH7iL2nM5oP8=';
-      async function encryptPayload(obj) {
-        const k = Uint8Array.from(atob(SECRET_KEY_BASE64), c => c.charCodeAt(0));
-        const key = await crypto.subtle.importKey('raw', k, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const enc = new TextEncoder().encode(JSON.stringify(obj));
-        const c = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc);
-        const combo = new Uint8Array(iv.byteLength + c.byteLength);
-        combo.set(iv);
-        combo.set(new Uint8Array(c), iv.byteLength);
-        return btoa(String.fromCharCode(...combo));
-      }
-      async function decryptPayload(b64) {
-        const k = Uint8Array.from(atob(SECRET_KEY_BASE64), c => c.charCodeAt(0));
-        const key = await crypto.subtle.importKey('raw', k, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-        const combo = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-        const iv = combo.slice(0, 12);
-        const data = combo.slice(12);
-        const dec = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
-        return JSON.parse(new TextDecoder().decode(dec));
-      }
-      (async () => {
-        try {
-          const payload = await encryptPayload({ login, password });
-          const res = await fetch(`${MUTANT_API}/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ data: payload })
-          });
-          if (!res.ok) throw new Error('Ошибка входа');
-          const json = await res.json();
-          const data = await decryptPayload(json.data);
-          token = data.jwt || data.token;
-          localStorage.setItem('skyid_token', token);
-          location.reload();
-        } catch (e) {
-          alert('Ошибка: ' + e.message);
-        }
-      })();
+    // ====== ФОРМА ВХОДА ======
+    function showLoginForm() {
+      const statusDiv = document.getElementById('adminStatus');
+      statusDiv.innerHTML = `
+        <div class="login-warning">
+          <p><strong>Вход в админ-панель</strong></p>
+          <input type="text" id="adminLoginInput" placeholder="Логин" style="background:#0d1225;border:1px solid #2a3450;color:white;padding:0.5rem;border-radius:6px;width:200px;margin:0.3rem 0;">
+          <br>
+          <input type="password" id="adminPassInput" placeholder="Пароль" style="background:#0d1225;border:1px solid #2a3450;color:white;padding:0.5rem;border-radius:6px;width:200px;margin:0.3rem 0;">
+          <br>
+          <button onclick="loginAdmin()" style="background:#5f7ecf;border:none;color:white;padding:0.5rem 1.5rem;border-radius:6px;cursor:pointer;margin-top:0.5rem;">Войти</button>
+          <button onclick="location.reload()" style="background:#444;border:none;color:white;padding:0.5rem 1.5rem;border-radius:6px;cursor:pointer;margin-top:0.5rem;margin-left:0.5rem;">Отмена</button>
+        </div>
+      `;
     }
 
-    // Загрузка данных
+    async function loginAdmin() {
+      const login = document.getElementById('adminLoginInput').value.trim();
+      const password = document.getElementById('adminPassInput').value;
+      if (!login || !password) { showToast('Заполните все поля', 'error'); return; }
+      try {
+        const payload = await encryptPayload({ login, password });
+        const res = await fetch(`${MUTANT_API}/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: payload })
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || 'Ошибка входа');
+        }
+        const json = await res.json();
+        const data = await decryptPayload(json.data);
+        token = data.jwt || data.token;
+        localStorage.setItem('skyid_token', token);
+        showToast('✅ Вход выполнен', 'success');
+        location.reload();
+      } catch (e) {
+        showToast('❌ Ошибка: ' + e.message, 'error');
+      }
+    }
+
+    // ====== API-ЗАПРОСЫ С ТОКЕНОМ ======
     async function fetchAdmin(endpoint, options = {}) {
-      const headers = { Authorization: `Bearer ${token}`, ...options.headers };
+      const headers = {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...options.headers
+      };
       const res = await fetch(endpoint, { ...options, headers });
+      if (res.status === 401 || res.status === 403) {
+        throw new Error('Unauthorized or Forbidden');
+      }
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text}`);
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 100)}`);
       }
       return res.json();
     }
 
+    // ====== ЗАГРУЗКА СТАТИСТИКИ ======
     async function loadStats() {
       try {
         const stats = await fetchAdmin(`${MUTANT_API}/admin/stats`);
@@ -161,15 +347,16 @@
         document.getElementById('statVideos').textContent = stats.videos || 0;
         document.getElementById('statAnnouncements').textContent = stats.announcements || 0;
       } catch (e) {
-        console.error('Stats error:', e);
+        console.warn('Статистика не загружена:', e);
       }
     }
 
+    // ====== ЗАГРУЗКА ПОЛЬЗОВАТЕЛЕЙ ======
     async function loadUsers() {
       const wrap = document.getElementById('usersTableWrap');
       try {
         const users = await fetchAdmin(`${MUTANT_API}/admin/users`);
-        if (!users.length) { wrap.innerHTML = '<p>Нет пользователей</p>'; return; }
+        if (!users.length) { wrap.innerHTML = '<p class="status-msg">Нет пользователей</p>'; return; }
         let html = `<table><tr><th>Логин</th><th>SkyID</th><th>Имя</th><th>Админ</th><th>Действия</th></tr>`;
         users.forEach(u => {
           html += `<tr>
@@ -185,7 +372,7 @@
         html += '</table>';
         wrap.innerHTML = html;
       } catch (e) {
-        wrap.innerHTML = `<p style="color:#c44;">Ошибка загрузки пользователей: ${e.message}</p>`;
+        wrap.innerHTML = `<p style="color:#c44;">❌ Ошибка: ${e.message}</p>`;
       }
     }
 
@@ -196,18 +383,19 @@
           method: 'POST',
           body: JSON.stringify({ login })
         });
-        alert('Пользователь забанен');
+        showToast(`✅ Пользователь ${login} забанен`, 'success');
         loadUsers();
       } catch (e) {
-        alert('Ошибка: ' + e.message);
+        showToast('❌ Ошибка: ' + e.message, 'error');
       }
     };
 
+    // ====== ЗАГРУЗКА ВИДЕО ======
     async function loadVideos() {
       const wrap = document.getElementById('videosTableWrap');
       try {
         const videos = await fetchAdmin(`${VIDEO_API}/admin/videos`);
-        if (!videos.length) { wrap.innerHTML = '<p>Нет видео</p>'; return; }
+        if (!videos.length) { wrap.innerHTML = '<p class="status-msg">Нет видео</p>'; return; }
         let html = `<table><tr><th>Название</th><th>Автор</th><th>Просмотры</th><th>Лайки</th><th>Комментарии</th><th>Действия</th></tr>`;
         videos.forEach(v => {
           html += `<tr>
@@ -222,7 +410,7 @@
         html += '</table>';
         wrap.innerHTML = html;
       } catch (e) {
-        wrap.innerHTML = `<p style="color:#c44;">Ошибка загрузки видео: ${e.message}</p>`;
+        wrap.innerHTML = `<p style="color:#c44;">❌ Ошибка: ${e.message}</p>`;
       }
     }
 
@@ -230,31 +418,32 @@
       if (!confirm('Удалить видео?')) return;
       try {
         await fetchAdmin(`${VIDEO_API}/admin/video/${id}`, { method: 'DELETE' });
-        alert('Видео удалено');
+        showToast('✅ Видео удалено', 'success');
         loadVideos();
       } catch (e) {
-        alert('Ошибка: ' + e.message);
+        showToast('❌ Ошибка: ' + e.message, 'error');
       }
     };
 
+    // ====== ЗАГРУЗКА КОММЕНТАРИЕВ ======
     async function loadComments() {
       const wrap = document.getElementById('commentsTableWrap');
       try {
         const comments = await fetchAdmin(`${VIDEO_API}/admin/comments`);
-        if (!comments.length) { wrap.innerHTML = '<p>Нет комментариев</p>'; return; }
+        if (!comments.length) { wrap.innerHTML = '<p class="status-msg">Нет комментариев</p>'; return; }
         let html = `<table><tr><th>Видео</th><th>Автор</th><th>Текст</th><th>Действия</th></tr>`;
         comments.slice(0, 100).forEach(c => {
           html += `<tr>
             <td>${escapeHtml(c.videoTitle)}</td>
             <td>${escapeHtml(c.author)}</td>
-            <td>${escapeHtml(c.text)}</td>
+            <td style="max-width:200px;word-break:break-all;">${escapeHtml(c.text)}</td>
             <td><button class="btn btn-danger btn-sm" onclick="deleteComment('${c.videoId}','${c.commentId}')">Удалить</button></td>
           </tr>`;
         });
         html += '</table>';
         wrap.innerHTML = html;
       } catch (e) {
-        wrap.innerHTML = `<p style="color:#c44;">Ошибка загрузки комментариев: ${e.message}</p>`;
+        wrap.innerHTML = `<p style="color:#c44;">❌ Ошибка: ${e.message}</p>`;
       }
     }
 
@@ -262,47 +451,19 @@
       if (!confirm('Удалить комментарий?')) return;
       try {
         await fetchAdmin(`${VIDEO_API}/admin/comment/${videoId}/${commentId}`, { method: 'DELETE' });
-        alert('Комментарий удалён');
+        showToast('✅ Комментарий удалён', 'success');
         loadComments();
       } catch (e) {
-        alert('Ошибка: ' + e.message);
+        showToast('❌ Ошибка: ' + e.message, 'error');
       }
     };
 
-    function escapeHtml(text) {
-      return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-    }
-
-    // Табы
-    document.querySelectorAll('.tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        const target = tab.dataset.tab;
-        document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-        document.getElementById('tab-' + target).classList.add('active');
-        if (target === 'users') loadUsers();
-        if (target === 'videos') loadVideos();
-        if (target === 'comments') loadComments();
-      });
-    });
-
-    // Инициализация
-    (async () => {
-      const isAdmin = await checkAdmin();
-      if (!isAdmin) {
-        document.querySelector('.stats').style.opacity = '0.5';
-        document.querySelector('.tabs').style.pointerEvents = 'none';
-        return;
-      }
-      loadStats();
-      loadUsers();
-    })();
+    // ====== ЗАГРУЗКА НАРУШЕНИЙ (МОДЕРАЦИЯ) ======
     async function loadViolations() {
       const wrap = document.getElementById('violationsTableWrap');
       try {
         const data = await fetchAdmin(`${MUTANT_API}/admin/violations`);
-        if (!data.length) { wrap.innerHTML = '<p>Нет нарушений</p>'; return; }
+        if (!data.length) { wrap.innerHTML = '<p class="status-msg">Нет нарушений</p>'; return; }
         let html = `<table><tr><th>IP</th><th>Логин</th><th>Сообщение</th><th>Оценка</th><th>Время</th><th>Действие</th></tr>`;
         data.forEach(v => {
           html += `<tr>
@@ -311,13 +472,13 @@
             <td style="max-width:200px;word-break:break-all;">${escapeHtml(v.text)}</td>
             <td>${(v.score || 0).toFixed(2)}</td>
             <td>${new Date(v.timestamp).toLocaleString()}</td>
-            <td><button class="btn btn-success btn-sm" onclick="unbanIP('${v.ip}')">Разбан</button></td>
+            <td><button class="btn btn-success btn-sm" onclick="unbanIP('${v.ip}')">Разбан IP</button></td>
           </tr>`;
         });
         html += '</table>';
         wrap.innerHTML = html;
       } catch (e) {
-        wrap.innerHTML = `<p style="color:#c44;">Ошибка: ${e.message}</p>`;
+        wrap.innerHTML = `<p style="color:#c44;">❌ Ошибка: ${e.message}</p>`;
       }
     }
 
@@ -328,12 +489,67 @@
           method: 'POST',
           body: JSON.stringify({ ip })
         });
-        alert('IP разблокирован');
+        showToast(`✅ IP ${ip} разблокирован`, 'success');
         loadViolations();
       } catch (e) {
-        alert('Ошибка: ' + e.message);
+        showToast('❌ Ошибка: ' + e.message, 'error');
       }
     };
+
+    // ====== ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК ======
+    function initTabs() {
+      const tabs = document.querySelectorAll('.tab');
+      const contents = {
+        users: document.getElementById('tab-users'),
+        videos: document.getElementById('tab-videos'),
+        comments: document.getElementById('tab-comments'),
+        violations: document.getElementById('tab-violations')
+      };
+      const loaders = {
+        users: loadUsers,
+        videos: loadVideos,
+        comments: loadComments,
+        violations: loadViolations
+      };
+
+      tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+          tabs.forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+          const target = tab.dataset.tab;
+          Object.keys(contents).forEach(key => {
+            contents[key].classList.toggle('active', key === target);
+          });
+          if (loaders[target]) loaders[target]();
+        });
+      });
+
+      // Первая вкладка уже активна, загружаем её
+      loadUsers();
+    }
+
+    // ====== ВСПОМОГАТЕЛЬНЫЕ ======
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, m => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;',
+        '"': '&quot;', "'": '&#39;'
+      }[m]));
+    }
+
+    // ====== ИНИЦИАЛИЗАЦИЯ ======
+    (async function init() {
+      const isAdmin = await checkAdmin();
+      if (!isAdmin) {
+        // Отключаем интерактивность
+        document.querySelector('.stats').style.opacity = '0.4';
+        document.querySelector('.tabs').style.pointerEvents = 'none';
+        document.querySelectorAll('.tab-content').forEach(el => el.style.opacity = '0.4');
+        return;
+      }
+      // Админ авторизован – загружаем всё
+      loadStats();
+      initTabs();
+    })();
   </script>
 </body>
 </html>
