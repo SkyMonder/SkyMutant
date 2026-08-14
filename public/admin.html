@@ -45,6 +45,7 @@
       <button class="tab active" data-tab="users">👥 Пользователи</button>
       <button class="tab" data-tab="videos">🎬 Видео</button>
       <button class="tab" data-tab="comments">💬 Комментарии</button>
+      <button class="tab" data-tab="violations">🚫 Нарушения</button>
     </div>
 
     <div id="tab-users" class="tab-content active">
@@ -55,6 +56,9 @@
     </div>
     <div id="tab-comments" class="tab-content">
       <div id="commentsTableWrap"><p>Загрузка...</p></div>
+    </div>
+    <div id="tab-violations" class="tab-content">
+       <div id="violationsTableWrap"><p>Загрузка...</p></div>
     </div>
 
     <a href="/" class="back-link">🏰 Вернуться в крепость</a>
@@ -294,6 +298,42 @@
       loadStats();
       loadUsers();
     })();
+    async function loadViolations() {
+      const wrap = document.getElementById('violationsTableWrap');
+      try {
+        const data = await fetchAdmin(`${MUTANT_API}/admin/violations`);
+        if (!data.length) { wrap.innerHTML = '<p>Нет нарушений</p>'; return; }
+        let html = `<table><tr><th>IP</th><th>Логин</th><th>Сообщение</th><th>Оценка</th><th>Время</th><th>Действие</th></tr>`;
+        data.forEach(v => {
+          html += `<tr>
+            <td>${escapeHtml(v.ip)}</td>
+            <td>${escapeHtml(v.login)}</td>
+            <td style="max-width:200px;word-break:break-all;">${escapeHtml(v.text)}</td>
+            <td>${(v.score || 0).toFixed(2)}</td>
+            <td>${new Date(v.timestamp).toLocaleString()}</td>
+            <td><button class="btn btn-success btn-sm" onclick="unbanIP('${v.ip}')">Разбан</button></td>
+          </tr>`;
+        });
+        html += '</table>';
+        wrap.innerHTML = html;
+      } catch (e) {
+        wrap.innerHTML = `<p style="color:#c44;">Ошибка: ${e.message}</p>`;
+      }
+    }
+
+    window.unbanIP = async (ip) => {
+      if (!confirm(`Разблокировать IP ${ip}?`)) return;
+      try {
+        await fetchAdmin(`${MUTANT_API}/admin/unban`, {
+          method: 'POST',
+          body: JSON.stringify({ ip })
+        });
+        alert('IP разблокирован');
+        loadViolations();
+      } catch (e) {
+        alert('Ошибка: ' + e.message);
+      }
+    };
   </script>
 </body>
 </html>
