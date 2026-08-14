@@ -650,9 +650,22 @@ app.post('/admin/ban', verifyToken, adminRequired, async (req, res) => {
   await dbPut('social_bans', skyid, { skyid, bannedAt: Date.now() });
   res.json({ ok: true });
 });
-app.post('/admin/unban', verifyToken, adminRequired, async (req, res) => {
+// ====== РАЗБАН ПОЛЬЗОВАТЕЛЯ (по skyid) ======
+app.post('/admin/unban-user', verifyToken, adminRequired, async (req, res) => {
   const { skyid } = req.body;
+  if (!skyid) return res.status(400).json({ error: 'skyid required' });
   await dbDelete('social_bans', skyid);
+  res.json({ ok: true });
+});
+
+// ====== РАЗБАН IP ======
+app.post('/admin/unban-ip', isAdmin, async (req, res) => {
+  const { ip } = req.body;
+  if (!ip) return res.status(400).json({ error: 'IP required' });
+  const cleanIp = ip.split(',')[0].split(':')[0];
+  const banned = await loadBannedIps();
+  delete banned[cleanIp];
+  await saveBannedIps(banned);
   res.json({ ok: true });
 });
 
