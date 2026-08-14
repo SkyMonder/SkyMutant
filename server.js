@@ -41,17 +41,41 @@ function getClientIP(req) {
   return ip.split(':')[0]; // удаляем порт если есть
 }
 
+// ====== РАБОТА С banned_ips.json ======
+const DATA_DIR = path.join(__dirname, 'data');
+const BANNED_IPS_FILE = path.join(DATA_DIR, 'banned_ips.json');
+
+// Гарантируем существование папки data
+(async () => {
+  try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) {}
+})();
+
+async function loadBannedIps() {
+  try {
+    const content = await fs.readFile(BANNED_IPS_FILE, 'utf-8');
+    return JSON.parse(content);
+  } catch (e) {
+    // Если файла нет или он повреждён, возвращаем пустой объект
+    return {};
+  }
+}
+
+async function saveBannedIps(data) {
+  await fs.writeFile(BANNED_IPS_FILE, JSON.stringify(data, null, 2));
+}
+
 // ====== MIDDLEWARE: ГЛОБАЛЬНАЯ ПРОВЕРКА БАНА ======
 app.use(async (req, res, next) => {
-  // Пропускаем только ban.html, иначе будет циклический редирект
+  // Пропускаем только ban.html и favicon, иначе циклический редирект
   if (req.path === '/ban.html' || req.path === '/favicon.ico') {
     return next();
   }
 
   const ip = getClientIP(req);
-  const banned = await dbGet('banned_ips', ip);
+  const banned = await loadBannedIps();
+  const banData = banned[ip];
 
-  if (banned) {
+  if (banData) {
     // ВСЕ API-эндпоинты (включая /admin, /chat, /posts и т.д.) — возвращают JSON
     const isApi = req.path.startsWith('/api/') ||
                   req.path.startsWith('/admin/') ||
@@ -77,7 +101,7 @@ app.use(async (req, res, next) => {
     if (isApi) {
       return res.status(403).json({
         error: 'Banned',
-        message: banned.message || 'Ваш IP заблокирован за нарушение правил'
+        message: banData.message || 'Ваш IP заблокирован за нарушение правил'
       });
     }
 
@@ -106,10 +130,7 @@ const CLIENT_KEY = Buffer.from(CLIENT_SECRET, 'base64');
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 let STORAGE_KEY = Buffer.from(process.env.STORAGE_KEY_HEX || crypto.randomBytes(32).toString('hex'), 'hex');
 
-// ---------- Асинхронная файловая БД ----------
-const DATA_DIR = path.join(__dirname, 'data');
-(async () => { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) {} })();
-
+// ---------- Асинхронная файловая БД (для остальных данных) ----------
 const listCache = new Map();
 
 async function ensureBucketDir(bucket) {
@@ -780,11 +801,14 @@ app.post('/report_violation', async (req, res) => {
 
   if (violations.count >= MAX_VIOLATIONS) {
     const lastReport = violations.reports[violations.reports.length - 1];
-    await dbPut('banned_ips', cleanIp, {
+    // Записываем в единый файл banned_ips.json
+    const banned = await loadBannedIps();
+    banned[cleanIp] = {
       bannedAt: Date.now(),
       reason: 'Exceeded violation limit',
       message: lastReport ? lastReport.text : 'Нарушение правил'
-    });
+    };
+    await saveBannedIps(banned);
     console.log(`🚫 IP ${cleanIp} забанен за нарушение: "${lastReport ? lastReport.text : ''}"`);
   }
   res.json({ ok: true });
@@ -809,13 +833,16 @@ app.post('/admin/unban', isAdmin, async (req, res) => {
   const { ip } = req.body;
   if (!ip) return res.status(400).json({ error: 'IP required' });
   const cleanIp = ip.split(',')[0].split(':')[0];
-  await dbDelete('banned_ips', cleanIp);
+  const banned = await loadBannedIps();
+  delete banned[cleanIp];
+  await saveBannedIps(banned);
   res.json({ ok: true });
 });
 
 app.get('/ban-info', async (req, res) => {
   const ip = getClientIP(req);
-  const banData = await dbGet('banned_ips', ip);
+  const banned = await loadBannedIps();
+  const banData = banned[ip];
   if (!banData) {
     return res.status(404).json({ error: 'Not banned' });
   }
@@ -840,11 +867,11 @@ wss.on('connection', (ws, req) => {
   ws.ip = ip;
 
   (async () => {
-    const banned = await dbGet('banned_ips', ip);
-    if (banned) {
+    const banned = await loadBannedIps();
+    if (banned[ip]) {
       ws.send(JSON.stringify({
         type: 'error',
-        message: `Ваш IP заблокирован за нарушение: "${banned.message || 'Нарушение правил'}". Для апелляции: skymonder@yandex.ru`
+        message: `Ваш IP заблокирован за нарушение: "${banned[ip].message || 'Нарушение правил'}". Для апелляции: skymonder@yandex.ru`
       }));
       ws.close();
       return;
@@ -937,8 +964,8 @@ async function handleGetMessages(ws, user, chatId) {
 }
 
 async function handleSendMessage(user, chatId, text, file, ip) {
-  const banned = await dbGet('banned_ips', ip);
-  if (banned) {
+  const banned = await loadBannedIps();
+  if (banned[ip]) {
     const ws = connections[user];
     if (ws) {
       ws.send(JSON.stringify({
