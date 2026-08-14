@@ -716,6 +716,10 @@ const chatListCache = new Map();
 
 wss.on('connection', (ws) => {
   let currentUser = null;
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  if (dbGet('banned_ips', ip)) {
+    ws.send(JSON.stringify({ type: 'error', message: 'Ваш IP заблокирован за нарушения.' }));
+    ws.close();
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch (e) { return; }
@@ -989,6 +993,70 @@ app.get('/api/search', async (req, res) => {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// ====== МОДЕРАЦИЯ И БАНЫ ======
+
+// Получить IP клиента
+app.get('/get_ip', (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '0.0.0.0';
+  res.json({ ip });
+});
+
+// Репорт о нарушении
+app.post('/report_violation', async (req, res) => {
+  const { login, ip, text, score } = req.body;
+  if (!login || !ip || !text) {
+    return res.status(400).json({ error: 'Missing fields' });
+  }
+
+  const violations = dbGet('violations', ip) || { count: 0, reports: [] };
+  violations.count += 1;
+  violations.reports.push({
+    login,
+    text,
+    score,
+    timestamp: Date.now(),
+    id: Date.now() + '_' + Math.random().toString(36).slice(2,6)
+  });
+  dbPut('violations', ip, violations);
+
+  // Если превышен лимит – бан
+  if (violations.count >= MAX_VIOLATIONS) {
+    dbPut('banned_ips', ip, { bannedAt: Date.now(), reason: 'Exceeded violation limit' });
+  }
+  res.json({ ok: true });
+});
+
+// Админ-панель: список нарушений
+app.get('/admin/violations', isAdmin, (req, res) => {
+  const ips = dbList('violations');
+  const allReports = [];
+  ips.forEach(ip => {
+    const data = dbGet('violations', ip);
+    if (data && data.reports) {
+      data.reports.forEach(r => {
+        allReports.push({ ip, ...r });
+      });
+    }
+  });
+  allReports.sort((a,b) => b.timestamp - a.timestamp);
+  res.json(allReports);
+});
+
+// Админ-панель: разбан IP
+app.post('/admin/unban', isAdmin, (req, res) => {
+  const { ip } = req.body;
+  if (!ip) return res.status(400).json({ error: 'IP required' });
+  dbDelete('banned_ips', ip);
+  // Опционально: очистить нарушения
+  // dbDelete('violations', ip);
+  res.json({ ok: true });
+});
+
+// Проверка бана при подключении WebSocket
+// В месте подключения ws:
+  // ... остальная логика
 });
 
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
