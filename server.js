@@ -34,25 +34,57 @@ app.use((req, res, next) => {
 // ====== СТАТИКА ======
 app.use(express.static('public'));
 
-// ====== MIDDLEWARE: ПРОВЕРКА БАНА ДЛЯ HTTP ======
+// ====== ФУНКЦИЯ ПОЛУЧЕНИЯ IP (учитывает Cloudflare) ======
 function getClientIP(req) {
   const forwarded = req.headers['x-forwarded-for'];
   const ip = forwarded ? forwarded.split(',')[0].trim() : req.socket.remoteAddress;
   return ip.split(':')[0]; // удаляем порт если есть
 }
 
+// ====== MIDDLEWARE: ГЛОБАЛЬНАЯ ПРОВЕРКА БАНА ======
 app.use(async (req, res, next) => {
-  if (req.path === '/ban.html' || req.path === '/favicon.ico' || req.path.startsWith('/.')) {
+  // Пропускаем только ban.html, иначе будет циклический редирект
+  if (req.path === '/ban.html' || req.path === '/favicon.ico') {
     return next();
   }
+
   const ip = getClientIP(req);
   const banned = await dbGet('banned_ips', ip);
+
   if (banned) {
-    if (req.path.startsWith('/api/') || req.path.startsWith('/admin/')) {
-      return res.status(403).json({ error: 'Banned', message: banned.message || 'Your IP is banned' });
+    // ВСЕ API-эндпоинты (включая /admin, /chat, /posts и т.д.) — возвращают JSON
+    const isApi = req.path.startsWith('/api/') ||
+                  req.path.startsWith('/admin/') ||
+                  req.path.startsWith('/chat/') ||
+                  req.path.startsWith('/spotify/') ||
+                  req.path.startsWith('/posts') ||
+                  req.path === '/register' ||
+                  req.path === '/login' ||
+                  req.path === '/verify' ||
+                  req.path === '/ban-info' ||
+                  req.path === '/announcements' ||
+                  req.path === '/search_groups' ||
+                  req.path === '/get_upload_token' ||
+                  req.path === '/upload_file' ||
+                  req.path === '/get_ip' ||
+                  req.path === '/report_violation' ||
+                  req.path === '/healthix' ||
+                  req.path === '/checkvizit' ||
+                  req.path === '/proxy' ||
+                  req.path === '/files' ||
+                  req.path.startsWith('/video');
+
+    if (isApi) {
+      return res.status(403).json({
+        error: 'Banned',
+        message: banned.message || 'Ваш IP заблокирован за нарушение правил'
+      });
     }
+
+    // Все HTML-страницы — редирект на ban.html
     return res.redirect('/ban.html');
   }
+
   next();
 });
 
@@ -639,9 +671,7 @@ app.post('/api/search', async (req, res) => {
   res.json({ data: await encryptClientResponse({ query: '', results: [] }) });
 });
 
-// ========== АДМИН-ПАНЕЛЬ (эндпоинты) ==========
-
-// Проверка, что пользователь – администратор
+// ========== АДМИН-ПАНЕЛЬ ==========
 async function isAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
@@ -659,7 +689,6 @@ async function isAdmin(req, res, next) {
   next();
 }
 
-// Список всех пользователей (только админ)
 app.get('/admin/users', isAdmin, async (req, res) => {
   try {
     const logins = await dbList('skyid_users');
@@ -682,7 +711,6 @@ app.get('/admin/users', isAdmin, async (req, res) => {
   }
 });
 
-// Статистика
 app.get('/admin/stats', isAdmin, async (req, res) => {
   try {
     const users = await dbList('skyid_users');
@@ -698,7 +726,6 @@ app.get('/admin/stats', isAdmin, async (req, res) => {
   }
 });
 
-// Удаление пользователя (только админ)
 app.delete('/admin/user/:login', isAdmin, async (req, res) => {
   const login = req.params.login;
   if (login === ADMIN_LOGIN) {
@@ -728,19 +755,16 @@ app.delete('/admin/user/:login', isAdmin, async (req, res) => {
 
 const MAX_VIOLATIONS = 1; // БАН ПОСЛЕ ПЕРВОГО НАРУШЕНИЯ
 
-// Получить IP клиента
 app.get('/get_ip', (req, res) => {
   const ip = getClientIP(req);
   res.json({ ip });
 });
 
-// Репорт о нарушении
 app.post('/report_violation', async (req, res) => {
   const { login, ip, text, score } = req.body;
   if (!login || !ip || !text) {
     return res.status(400).json({ error: 'Missing fields' });
   }
-  // Очищаем IP от порта и лишнего
   const cleanIp = ip.split(',')[0].split(':')[0];
   let violations = await dbGet('violations', cleanIp);
   if (!violations) violations = { count: 0, reports: [] };
@@ -754,7 +778,6 @@ app.post('/report_violation', async (req, res) => {
   });
   await dbPut('violations', cleanIp, violations);
 
-  // Если превышен лимит – бан с сохранением текста последнего нарушения
   if (violations.count >= MAX_VIOLATIONS) {
     const lastReport = violations.reports[violations.reports.length - 1];
     await dbPut('banned_ips', cleanIp, {
@@ -767,7 +790,6 @@ app.post('/report_violation', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Админ-панель: список нарушений
 app.get('/admin/violations', isAdmin, async (req, res) => {
   const ips = await dbList('violations');
   const allReports = [];
@@ -783,7 +805,6 @@ app.get('/admin/violations', isAdmin, async (req, res) => {
   res.json(allReports);
 });
 
-// Админ-панель: разбан IP
 app.post('/admin/unban', isAdmin, async (req, res) => {
   const { ip } = req.body;
   if (!ip) return res.status(400).json({ error: 'IP required' });
@@ -792,7 +813,6 @@ app.post('/admin/unban', isAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Получить информацию о бане (для ban.html)
 app.get('/ban-info', async (req, res) => {
   const ip = getClientIP(req);
   const banData = await dbGet('banned_ips', ip);
@@ -806,7 +826,7 @@ app.get('/ban-info', async (req, res) => {
   });
 });
 
-// ========== WebSocket (мессенджер) ==========
+// ========== WebSocket ==========
 const server = http.createServer(app);
 server.timeout = 120000;
 
@@ -816,18 +836,15 @@ const chatListCache = new Map();
 
 wss.on('connection', (ws, req) => {
   let currentUser = null;
-  // Определяем IP правильно (с учётом Cloudflare)
   const ip = getClientIP(req);
-  ws.ip = ip; // сохраняем чистый IP
+  ws.ip = ip;
 
-  // Проверка бана при подключении
   (async () => {
     const banned = await dbGet('banned_ips', ip);
     if (banned) {
-      const msg = banned.message || 'Нарушение правил';
       ws.send(JSON.stringify({
         type: 'error',
-        message: `Ваш IP заблокирован за нарушение: "${msg}". Для апелляции: skymonder@yandex.ru`
+        message: `Ваш IP заблокирован за нарушение: "${banned.message || 'Нарушение правил'}". Для апелляции: skymonder@yandex.ru`
       }));
       ws.close();
       return;
@@ -919,21 +936,16 @@ async function handleGetMessages(ws, user, chatId) {
   ws.send(JSON.stringify({ type: 'messages', messages: chat.messages || [] }));
 }
 
-// ОБНОВЛЁННАЯ ФУНКЦИЯ С ПРОВЕРКОЙ БАНА И ЗАКРЫТИЕМ СОЕДИНЕНИЯ
 async function handleSendMessage(user, chatId, text, file, ip) {
-  console.log(`📤 Сообщение от ${user} с IP ${ip}`);
-
-  // Проверка бана по IP
   const banned = await dbGet('banned_ips', ip);
   if (banned) {
-    console.log(`🚫 Блокировка сообщения: IP ${ip} забанен`);
     const ws = connections[user];
     if (ws) {
       ws.send(JSON.stringify({
         type: 'error',
-        message: `Ваш IP заблокирован за нарушение: "${banned.message || 'Нарушение правил'}". Вы не можете отправлять сообщения.`
+        message: `Ваш IP заблокирован. Вы не можете отправлять сообщения.`
       }));
-      ws.close(); // принудительно закрываем соединение
+      ws.close();
     }
     return;
   }
