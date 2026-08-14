@@ -702,6 +702,84 @@ app.delete('/admin/user/:login', isAdmin, async (req, res) => {
   }
 });
 
+// ========== МОДЕРАЦИЯ И БАНЫ ==========
+
+const MAX_VIOLATIONS = 1; // БАН ПОСЛЕ ПЕРВОГО НАРУШЕНИЯ
+
+// Получить IP клиента
+app.get('/get_ip', (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '0.0.0.0';
+  res.json({ ip });
+});
+
+// Репорт о нарушении
+app.post('/report_violation', async (req, res) => {
+  const { login, ip, text, score } = req.body;
+  if (!login || !ip || !text) {
+    return res.status(400).json({ error: 'Missing fields' });
+  }
+  let violations = await dbGet('violations', ip);
+  if (!violations) violations = { count: 0, reports: [] };
+  violations.count += 1;
+  violations.reports.push({
+    login,
+    text,
+    score,
+    timestamp: Date.now(),
+    id: Date.now() + '_' + Math.random().toString(36).slice(2,6)
+  });
+  await dbPut('violations', ip, violations);
+
+  // Если превышен лимит – бан с сохранением текста последнего нарушения
+  if (violations.count >= MAX_VIOLATIONS) {
+    const lastReport = violations.reports[violations.reports.length - 1];
+    await dbPut('banned_ips', ip, {
+      bannedAt: Date.now(),
+      reason: 'Exceeded violation limit',
+      message: lastReport ? lastReport.text : 'Нарушение правил'
+    });
+  }
+  res.json({ ok: true });
+});
+
+// Админ-панель: список нарушений
+app.get('/admin/violations', isAdmin, async (req, res) => {
+  const ips = await dbList('violations');
+  const allReports = [];
+  for (const ip of ips) {
+    const data = await dbGet('violations', ip);
+    if (data && data.reports) {
+      data.reports.forEach(r => {
+        allReports.push({ ip, ...r });
+      });
+    }
+  }
+  allReports.sort((a,b) => b.timestamp - a.timestamp);
+  res.json(allReports);
+});
+
+// Админ-панель: разбан IP
+app.post('/admin/unban', isAdmin, async (req, res) => {
+  const { ip } = req.body;
+  if (!ip) return res.status(400).json({ error: 'IP required' });
+  await dbDelete('banned_ips', ip);
+  res.json({ ok: true });
+});
+
+// Получить информацию о бане (для ban.html)
+app.get('/ban-info', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '0.0.0.0';
+  const banData = await dbGet('banned_ips', ip);
+  if (!banData) {
+    return res.status(404).json({ error: 'Not banned' });
+  }
+  res.json({
+    banned: true,
+    message: banData.message || 'Нарушение правил',
+    bannedAt: banData.bannedAt
+  });
+});
+
 // ========== WebSocket (мессенджер) ==========
 const server = http.createServer(app);
 server.timeout = 120000;
@@ -718,7 +796,11 @@ wss.on('connection', (ws, req) => {
   (async () => {
     const banned = await dbGet('banned_ips', ip);
     if (banned) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Ваш IP заблокирован за нарушения.' }));
+      const msg = banned.message || 'Нарушение правил';
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: `Ваш IP заблокирован за нарушение: "${msg}". Для апелляции: skymonder@yandex.ru`
+      }));
       ws.close();
       return;
     }
@@ -982,62 +1064,6 @@ app.get('/api/search', async (req, res) => {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
-});
-
-// ====== МОДЕРАЦИЯ И БАНЫ ======
-
-// Получить IP клиента
-app.get('/get_ip', (req, res) => {
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '0.0.0.0';
-  res.json({ ip });
-});
-
-// Репорт о нарушении
-const MAX_VIOLATIONS = 3;
-app.post('/report_violation', async (req, res) => {
-  const { login, ip, text, score } = req.body;
-  if (!login || !ip || !text) {
-    return res.status(400).json({ error: 'Missing fields' });
-  }
-  let violations = await dbGet('violations', ip);
-  if (!violations) violations = { count: 0, reports: [] };
-  violations.count += 1;
-  violations.reports.push({
-    login,
-    text,
-    score,
-    timestamp: Date.now(),
-    id: Date.now() + '_' + Math.random().toString(36).slice(2,6)
-  });
-  await dbPut('violations', ip, violations);
-  if (violations.count >= MAX_VIOLATIONS) {
-    await dbPut('banned_ips', ip, { bannedAt: Date.now(), reason: 'Exceeded violation limit' });
-  }
-  res.json({ ok: true });
-});
-
-// Админ-панель: список нарушений
-app.get('/admin/violations', isAdmin, async (req, res) => {
-  const ips = await dbList('violations');
-  const allReports = [];
-  for (const ip of ips) {
-    const data = await dbGet('violations', ip);
-    if (data && data.reports) {
-      data.reports.forEach(r => {
-        allReports.push({ ip, ...r });
-      });
-    }
-  }
-  allReports.sort((a,b) => b.timestamp - a.timestamp);
-  res.json(allReports);
-});
-
-// Админ-панель: разбан IP
-app.post('/admin/unban', isAdmin, async (req, res) => {
-  const { ip } = req.body;
-  if (!ip) return res.status(400).json({ error: 'IP required' });
-  await dbDelete('banned_ips', ip);
-  res.json({ ok: true });
 });
 
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
