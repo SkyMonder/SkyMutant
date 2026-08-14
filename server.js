@@ -34,6 +34,26 @@ app.use((req, res, next) => {
 // ====== СТАТИКА ======
 app.use(express.static('public'));
 
+// ====== MIDDLEWARE: ПРОВЕРКА БАНА ======
+app.use(async (req, res, next) => {
+  // Пропускаем статику и сам ban.html
+  if (req.path === '/ban.html' || req.path === '/favicon.ico' || req.path.startsWith('/.')) {
+    return next();
+  }
+  const ipHeader = req.headers['x-forwarded-for'];
+  const ip = ipHeader ? ipHeader.split(',')[0].trim() : req.socket.remoteAddress;
+  const cleanIp = ip.split(':')[0]; // удаляем порт если есть
+  const banned = await dbGet('banned_ips', cleanIp);
+  if (banned) {
+    // Если запрос к API, возвращаем JSON, иначе редирект
+    if (req.path.startsWith('/api/') || req.path.startsWith('/admin/')) {
+      return res.status(403).json({ error: 'Banned', message: banned.message || 'Your IP is banned' });
+    }
+    return res.redirect('/ban.html');
+  }
+  next();
+});
+
 // ====== CORS ======
 app.use(cors({
   origin: '*',
@@ -708,7 +728,8 @@ const MAX_VIOLATIONS = 1; // БАН ПОСЛЕ ПЕРВОГО НАРУШЕНИЯ
 
 // Получить IP клиента
 app.get('/get_ip', (req, res) => {
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '0.0.0.0';
+  const ipHeader = req.headers['x-forwarded-for'];
+  const ip = ipHeader ? ipHeader.split(',')[0].trim() : req.socket.remoteAddress;
   res.json({ ip });
 });
 
@@ -768,7 +789,8 @@ app.post('/admin/unban', isAdmin, async (req, res) => {
 
 // Получить информацию о бане (для ban.html)
 app.get('/ban-info', async (req, res) => {
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '0.0.0.0';
+  const ipHeader = req.headers['x-forwarded-for'];
+  const ip = ipHeader ? ipHeader.split(',')[0].trim() : req.socket.remoteAddress;
   const banData = await dbGet('banned_ips', ip);
   if (!banData) {
     return res.status(404).json({ error: 'Not banned' });
@@ -790,9 +812,12 @@ const chatListCache = new Map();
 
 wss.on('connection', (ws, req) => {
   let currentUser = null;
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  // Определяем IP правильно (с учётом Cloudflare)
+  const ipHeader = req.headers['x-forwarded-for'];
+  const ip = ipHeader ? ipHeader.split(',')[0].trim() : req.socket.remoteAddress;
+  ws.ip = ip; // сохраняем IP в объекте ws
 
-  // Проверка бана (асинхронная)
+  // Проверка бана при подключении
   (async () => {
     const banned = await dbGet('banned_ips', ip);
     if (banned) {
@@ -825,8 +850,12 @@ wss.on('connection', (ws, req) => {
       switch (msg.type) {
         case 'get_chats': await sendChatList(currentUser); break;
         case 'get_messages': await handleGetMessages(ws, currentUser, msg.chatId); break;
-        case 'send_message': await handleSendMessage(currentUser, msg.chatId, msg.text, null); break;
-        case 'file_message': await handleSendMessage(currentUser, msg.chatId, msg.text, msg.file); break;
+        case 'send_message':
+          await handleSendMessage(currentUser, msg.chatId, msg.text, null, ws.ip);
+          break;
+        case 'file_message':
+          await handleSendMessage(currentUser, msg.chatId, msg.text, msg.file, ws.ip);
+          break;
         case 'edit_message': await handleEditMessage(currentUser, msg.chatId, msg.messageId, msg.newText); break;
         case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
         case 'search_user': {
@@ -860,6 +889,7 @@ wss.on('connection', (ws, req) => {
   });
 });
 
+// ====== ФУНКЦИИ ОБРАБОТКИ СООБЩЕНИЙ ======
 async function sendChatList(user) {
   const cached = chatListCache.get(user);
   if (cached && (Date.now() - cached.timestamp) < 2000) {
@@ -879,12 +909,28 @@ async function sendChatList(user) {
   chatListCache.set(user, { chats: list, timestamp: Date.now() });
   if (connections[user]) connections[user].send(JSON.stringify({ type: 'chat_list', chats: list }));
 }
+
 async function handleGetMessages(ws, user, chatId) {
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return ws.send(JSON.stringify({ type: 'messages', messages: [] }));
   ws.send(JSON.stringify({ type: 'messages', messages: chat.messages || [] }));
 }
-async function handleSendMessage(user, chatId, text, file) {
+
+// ОБНОВЛЁННАЯ ФУНКЦИЯ С ПРОВЕРКОЙ БАНА
+async function handleSendMessage(user, chatId, text, file, ip) {
+  // Проверка бана по IP
+  const banned = await dbGet('banned_ips', ip);
+  if (banned) {
+    const ws = connections[user];
+    if (ws) {
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Ваш IP заблокирован. Вы не можете отправлять сообщения.'
+      }));
+    }
+    return;
+  }
+
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
   const message = { id: 'msg_' + Date.now(), from: user, text: text || '', time: Date.now() };
@@ -898,6 +944,7 @@ async function handleSendMessage(user, chatId, text, file) {
     }
   }
 }
+
 async function handleEditMessage(user, chatId, messageId, newText) {
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
@@ -911,6 +958,7 @@ async function handleEditMessage(user, chatId, messageId, newText) {
     }
   });
 }
+
 async function handleDeleteMessage(user, chatId, messageId) {
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
@@ -924,6 +972,7 @@ async function handleDeleteMessage(user, chatId, messageId) {
     }
   });
 }
+
 async function createPrivateChat(u1, u2) {
   const user = await dbGet('chat_users', u2);
   if (!user) return;
@@ -932,22 +981,26 @@ async function createPrivateChat(u1, u2) {
   await sendChatList(u1); await sendChatList(u2);
   if (connections[u1]) connections[u1].send(JSON.stringify({ type: 'chat_created', chatId: id }));
 }
+
 async function createGroup(user, name) {
   const id = 'group_' + Date.now();
   await dbPut('chats', id, { type: 'group', name, members: [user], messages: [], created: Date.now() });
   await sendChatList(user);
 }
+
 async function createChannel(user, name) {
   const id = 'channel_' + Date.now();
   await dbPut('chats', id, { type: 'channel', name, members: [user], messages: [], created: Date.now() });
   await sendChatList(user);
 }
+
 async function joinGroup(user, chatId) {
   const chat = await dbGet('chats', chatId);
   if (!chat || (chat.type !== 'group' && chat.type !== 'channel')) return;
   if (!chat.members.includes(user)) { chat.members.push(user); await dbPut('chats', chatId, chat); }
   await sendChatList(user);
 }
+
 async function leaveGroup(user, chatId) {
   const chat = await dbGet('chats', chatId);
   if (!chat || (chat.type !== 'group' && chat.type !== 'channel')) return;
@@ -955,6 +1008,7 @@ async function leaveGroup(user, chatId) {
   await dbPut('chats', chatId, chat);
   await sendChatList(user);
 }
+
 async function deleteChat(user, chatId) {
   const chat = await dbGet('chats', chatId);
   if (!chat) return;
@@ -967,6 +1021,7 @@ async function deleteChat(user, chatId) {
   }
   await sendChatList(user);
 }
+
 async function blockChat(user, chatId) {
   const chat = await dbGet('chats', chatId);
   if (!chat) return;
@@ -975,6 +1030,7 @@ async function blockChat(user, chatId) {
   await dbPut('chats', chatId, chat);
   await sendChatList(user);
 }
+
 async function unblockChat(user, chatId) {
   const chat = await dbGet('chats', chatId);
   if (!chat) return;
@@ -982,6 +1038,7 @@ async function unblockChat(user, chatId) {
   await dbPut('chats', chatId, chat);
   await sendChatList(user);
 }
+
 async function updateProfile(user, data, ws) {
   const profile = await dbGet('chat_users', user);
   if (!profile) return;
@@ -991,6 +1048,7 @@ async function updateProfile(user, data, ws) {
   await dbPut('chat_users', user, profile);
   ws.send(JSON.stringify({ type: 'profile_updated', profile }));
 }
+
 async function forwardSignaling(msg, from) {
   const chat = await dbGet('chats', msg.chatId);
   if (!chat) return;
