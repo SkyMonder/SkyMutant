@@ -70,7 +70,7 @@ async function saveBannedIps(data) {
 
 // ====== MIDDLEWARE: ГЛОБАЛЬНАЯ ПРОВЕРКА БАНА ======
 app.use(async (req, res, next) => {
-  // Пропускаем только ban.html и favicon, иначе циклический редирект
+  // Пропускаем только ban.html и favicon (чтобы не было цикла)
   if (req.path === '/ban.html' || req.path === '/favicon.ico') {
     return next();
   }
@@ -80,42 +80,12 @@ app.use(async (req, res, next) => {
   const banData = banned[ip];
 
   if (banData) {
-    // ВСЕ API-эндпоинты (включая /admin, /chat, /posts и т.д.) — возвращают JSON
-    const isApi = req.path.startsWith('/api/') ||
-                  req.path.startsWith('/admin/') ||
-                  req.path.startsWith('/chat/') ||
-                  req.path.startsWith('/spotify/') ||
-                  req.path.startsWith('/posts') ||
-                  req.path === '/register' ||
-                  req.path === '/login' ||
-                  req.path === '/verify' ||
-                  req.path === '/ban-info' ||
-                  req.path === '/announcements' ||
-                  req.path === '/search_groups' ||
-                  req.path === '/get_upload_token' ||
-                  req.path === '/upload_file' ||
-                  req.path === '/get_ip' ||
-                  req.path === '/report_violation' ||
-                  req.path === '/healthix' ||
-                  req.path === '/checkvizit' ||
-                  req.path === '/proxy' ||
-                  req.path === '/files' ||
-                  req.path.startsWith('/video');
-
-    if (isApi) {
-      return res.status(403).json({
-        error: 'Banned',
-        message: banData.message || 'Ваш IP заблокирован за нарушение правил'
-      });
-    }
-
-    // Все HTML-страницы — редирект на ban.html
-    return res.redirect('/ban.html');
+    // Для ВСЕХ запросов (включая API, статику и т.д.) отдаём ban.html с кодом 403
+    return res.status(403).sendFile(path.join(__dirname, 'ban.html'));
   }
 
   next();
 });
-
 // ====== CORS ======
 app.use(cors({
   origin: '*',
