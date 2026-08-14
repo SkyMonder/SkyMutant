@@ -31,6 +31,9 @@ app.use((req, res, next) => {
   next();
 });
 
+// ====== СТАТИКА ======
+app.use(express.static('public')); // теперь admin.html доступен по /admin.html
+
 // ====== CORS ======
 app.use(cors({
   origin: '*',
