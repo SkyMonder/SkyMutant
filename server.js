@@ -48,7 +48,6 @@ const CLIENT_SECRET = "BLx5Vp7U1c8dR2mQkG4fJ6yA9tC3bF0zH7iL2nM5oP8=";
 const CLIENT_KEY = Buffer.from(CLIENT_SECRET, 'base64');
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 let STORAGE_KEY = Buffer.from(process.env.STORAGE_KEY_HEX || crypto.randomBytes(32).toString('hex'), 'hex');
-const OPENSERP_URL = process.env.OPENSERP_URL || 'https://skymutant.cc.cd/openserp';
 
 // ---------- Асинхронная файловая БД ----------
 const DATA_DIR = path.join(__dirname, 'data');
@@ -162,7 +161,6 @@ const uploadTokens = {};
 
 // ========== КЕШИРОВАНИЕ ==========
 const userCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
-const searchCache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 минут
 const tokenCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 const announcementCache = { data: null, time: 0 };
 
@@ -290,7 +288,6 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Проверка JWT (для сервисов)
 app.post('/verify', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace('Bearer ', '') || req.body.token;
@@ -344,68 +341,6 @@ app.post('/api/weather', async (req, res) => {
   const enc = await encryptClientResponse(answer);
   res.json({ data: enc });
 });
-
-const webpush = require('web-push');
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(
-    'mailto:skymonder@yandex.ru',
-    VAPID_PUBLIC_KEY,
-    VAPID_PRIVATE_KEY
-  );
-} else {
-  console.warn('⚠️ VAPID ключи не заданы, push-уведомления не будут работать');
-}
-
-// ====== PUSH ======
-app.post('/api/push/subscribe', verifyToken, async (req, res) => {
-  const { subscription } = req.body;
-  if (!subscription) return res.status(400).json({ error: 'Subscription required' });
-  const user = await getCachedUser(req.login);
-  if (!user) return res.status(401).json({ error: 'User not found' });
-  const existing = dbGet('push_subscriptions', req.login) || [];
-  const filtered = existing.filter(sub => sub.endpoint !== subscription.endpoint);
-  filtered.push(subscription);
-  dbPut('push_subscriptions', req.login, filtered);
-  res.json({ ok: true });
-});
-
-app.post('/api/push/unsubscribe', verifyToken, async (req, res) => {
-  const { endpoint } = req.body;
-  if (!endpoint) return res.status(400).json({ error: 'Endpoint required' });
-  const subscriptions = dbGet('push_subscriptions', req.login) || [];
-  const filtered = subscriptions.filter(sub => sub.endpoint !== endpoint);
-  dbPut('push_subscriptions', req.login, filtered);
-  res.json({ ok: true });
-});
-
-async function sendPushNotification(login, payload) {
-  if (!VAPID_PUBLIC_KEY) return;
-  const subscriptions = dbGet('push_subscriptions', login) || [];
-  if (!subscriptions.length) return;
-  const notification = {
-    title: payload.title || 'SkyCitadel',
-    body: payload.body || '',
-    icon: payload.icon || '/favicon.ico',
-    data: { url: payload.url || '/' }
-  };
-  for (const sub of subscriptions) {
-    try {
-      await webpush.sendNotification(sub, JSON.stringify(notification));
-    } catch (err) {
-      if (err.statusCode === 410 || err.statusCode === 404) {
-        const updated = subscriptions.filter(s => s.endpoint !== sub.endpoint);
-        dbPut('push_subscriptions', login, updated);
-      }
-    }
-  }
-}
-
-// Пример: отправка уведомления при новом сообщении (интегрировать в WebSocket)
-// В обработчике handleSendMessage после сохранения сообщения:
-// await sendPushNotification(получатель, { title: 'Новое сообщение', body: `${отправитель}: ${текст}`, url: `/messenger` });
 
 // ========== Объявления ==========
 app.get('/announcements', async (req, res) => {
@@ -583,7 +518,6 @@ async function verifyToken(req, res, next) {
     }
   }
 
-  // Fallback для старых токенов
   const users = await dbList('skyid_users');
   for (const login of users) {
     const user = await getCachedUser(login);
@@ -675,48 +609,97 @@ app.post('/admin/unban', verifyToken, adminRequired, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/search', async (req, res) => {
-  const query = req.query.q;
-  const count = parseInt(req.query.count) || 10;
-  const offset = parseInt(req.query.offset) || 0;
-  const engine = req.query.engine || 'duckduckgo';
+// ========== Поиск (заглушка) ==========
+app.post('/api/search', async (req, res) => {
+  res.json({ data: await encryptClientResponse({ query: '', results: [] }) });
+});
 
-  if (!query) {
-    return res.status(400).json({ error: 'Missing query parameter "q"' });
+// ========== АДМИН-ПАНЕЛЬ (эндпоинты) ==========
+
+// Проверка, что пользователь – администратор
+async function isAdmin(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  const token = authHeader.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+  const decoded = verifyJWT(token);
+  if (!decoded || !decoded.login) return res.status(401).json({ error: 'Invalid token' });
+
+  const user = await getCachedUser(decoded.login);
+  if (!user || user.login !== ADMIN_LOGIN) {
+    return res.status(403).json({ error: 'Forbidden: admin only' });
   }
+  req.user = user;
+  next();
+}
 
-
-
+// Список всех пользователей (только админ)
+app.get('/admin/users', isAdmin, async (req, res) => {
   try {
-    const openserpUrl = `${OPENSERP_URL}/${engine}/search?text=${encodeURIComponent(query)}&limit=${count}&start=${offset}`;
-    console.log('Search request:', openserpUrl);
-
-    const response = await fetch(openserpUrl);
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('OpenSERP error:', response.status, errorText);
-      return res.status(response.status).json({ error: 'Search engine error' });
+    const logins = await dbList('skyid_users');
+    const users = [];
+    for (const login of logins) {
+      const user = await getCachedUser(login);
+      if (user) {
+        users.push({
+          login: user.login,
+          skyid: user.skyid,
+          name: user.name || user.login,
+          avatar: user.avatar || '',
+          isAdmin: user.login === ADMIN_LOGIN
+        });
+      }
     }
+    res.json(users);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    const data = await response.json();
-
-    const results = data.results?.map(item => ({
-      title: item.title || '',
-      url: item.url || '',
-      description: item.snippet || item.description || '',
-      icon: item.favicon || `https://www.google.com/s2/favicons?domain=${item.domain || new URL(item.url).hostname}&sz=32`
-    })) || [];
-
+// Статистика
+app.get('/admin/stats', isAdmin, async (req, res) => {
+  try {
+    const users = await dbList('skyid_users');
+    const videos = await dbList('videos') || []; // если есть папка videos в SkyMutant
+    const announcements = await dbList('announcements');
     res.json({
-      query,
-      results,
-      total: results.length,
-      nextOffset: offset + results.length
+      users: users.length,
+      videos: videos.length,
+      announcements: announcements.length
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
-  } catch (err) {
-    console.error('Search error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+// Удаление пользователя (только админ)
+app.delete('/admin/user/:login', isAdmin, async (req, res) => {
+  const login = req.params.login;
+  if (login === ADMIN_LOGIN) {
+    return res.status(403).json({ error: 'Cannot delete admin' });
+  }
+  try {
+    const user = await getCachedUser(login);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    // Удаляем из skyid_users
+    await dbDelete('skyid_users', login);
+    // Удаляем из чатов (если есть)
+    await dbDelete('chat_users', login);
+    // Удаляем токены
+    const tokens = await dbList('tokens');
+    for (const tok of tokens) {
+      const data = await dbGet('tokens', tok);
+      if (data && data.login === login) {
+        await dbDelete('tokens', tok);
+      }
+    }
+    // Сброс кеша
+    userCache.del(login);
+    if (skyidIndex) skyidIndex.delete(user.skyid);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -821,16 +804,7 @@ async function handleSendMessage(user, chatId, text, file) {
       connections[m].send(JSON.stringify({ type: 'message', chatId, ...message }));
     }
   }
-  // Отправляем push получателю (если он не в сети)
-  if (!connections[otherUser]) {
-    await sendPushNotification(otherUser, {
-      title: `Новое сообщение от ${user}`,
-      body: text,
-      url: `/?section=messenger&chat=${chatId}`
-    });
-  }
 }
-
 async function handleEditMessage(user, chatId, messageId, newText) {
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
