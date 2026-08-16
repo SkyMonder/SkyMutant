@@ -1519,4 +1519,34 @@ app.post('/api/analytics', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// ====== ВЕРИФИКАЦИЯ ДЛЯ ИГР (GET) ======
+app.get('/gaverify', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.replace('Bearer ', '');
+  if (!token) {
+    return res.status(400).json({ error: 'Token required' });
+  }
+
+  const decoded = verifyJWT(token);
+  if (decoded) {
+    const user = await getUserBySkyid(decoded.skyid);
+    if (user) {
+      return res.json({ skyid: decoded.skyid, login: decoded.login });
+    }
+  }
+
+  const tokenData = await getTokenData(token);
+  if (!tokenData) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+  if (tokenData.expires < Date.now()) {
+    await deleteToken(token);
+    return res.status(401).json({ error: 'Token expired' });
+  }
+  const user = await getCachedUser(tokenData.login);
+  if (!user) {
+    return res.status(401).json({ error: 'User not found' });
+  }
+  res.json({ skyid: user.skyid, login: user.login });
+});
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
