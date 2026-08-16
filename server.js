@@ -1255,5 +1255,60 @@ app.get('/api/stats/public', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// ====== АНОНИМНАЯ АНАЛИТИКА (приём данных) ======
+const ANALYTICS_FILE = path.join(DATA_DIR, 'analytics.json');
 
+// Инициализация файла, если его нет
+(async function initAnalytics() {
+  try {
+    await fs.access(ANALYTICS_FILE);
+  } catch (e) {
+    await fs.writeFile(ANALYTICS_FILE, JSON.stringify({ pages: {}, devices: {}, countries: {}, hourly: {} }));
+    console.log('📁 Создан файл analytics.json');
+  }
+})();
+
+app.post('/api/analytics', async (req, res) => {
+  const { page, deviceType, country } = req.body;
+  if (!page) {
+    return res.status(400).json({ error: 'Page is required' });
+  }
+
+  try {
+    let analytics = { pages: {}, devices: {}, countries: {}, hourly: {} };
+    try {
+      const content = await fs.readFile(ANALYTICS_FILE, 'utf-8');
+      analytics = JSON.parse(content);
+    } catch (e) {}
+
+    const today = new Date().toISOString().split('T')[0];
+    const hour = new Date().getHours();
+
+    // pages
+    if (!analytics.pages[today]) analytics.pages[today] = {};
+    analytics.pages[today][page] = (analytics.pages[today][page] || 0) + 1;
+
+    // devices
+    if (deviceType) {
+      if (!analytics.devices[today]) analytics.devices[today] = {};
+      analytics.devices[today][deviceType] = (analytics.devices[today][deviceType] || 0) + 1;
+    }
+
+    // countries
+    if (country) {
+      if (!analytics.countries[today]) analytics.countries[today] = {};
+      analytics.countries[today][country] = (analytics.countries[today][country] || 0) + 1;
+    }
+
+    // hourly
+    if (!analytics.hourly[today]) analytics.hourly[today] = {};
+    analytics.hourly[today][hour] = (analytics.hourly[today][hour] || 0) + 1;
+
+    await fs.writeFile(ANALYTICS_FILE, JSON.stringify(analytics, null, 2));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Ошибка в /api/analytics:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
