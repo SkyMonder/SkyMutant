@@ -888,6 +888,212 @@ wss.on('connection', (ws, req) => {
           ws.send(JSON.stringify({ type: 'user_search_result', users: all.map(u => ({ login: u })) }));
           break;
         }
+                // ====== ИГРЫ (SKYGAMES) ======
+        case 'games_auth': {
+          const { token: gamesToken, username: gamesUsername } = msg;
+          const decodedGames = verifyJWT(gamesToken);
+          if (decodedGames && decodedGames.login) {
+            gamePlayers[ws] = { username: decodedGames.login, roomId: null };
+            ws.send(JSON.stringify({ type: 'games_auth_ok' }));
+          } else {
+            ws.send(JSON.stringify({ type: 'games_error', message: 'Auth failed' }));
+          }
+          break;
+        }
+
+        case 'games_list_rooms': {
+          const roomList = Object.keys(gameRooms).map(id => {
+            const r = gameRooms[id];
+            return {
+              roomId: id,
+              gameType: r.gameType,
+              players: Object.keys(r.players || {}),
+              state: r.state
+            };
+          });
+          ws.send(JSON.stringify({ type: 'games_room_list', rooms: roomList }));
+          break;
+        }
+
+        case 'games_create_room': {
+          const gameType = msg.gameType;
+          const playerInfo = gamePlayers[ws];
+          if (!playerInfo) return ws.send(JSON.stringify({ type: 'games_error', message: 'Not authorized' }));
+          if (playerInfo.roomId) return ws.send(JSON.stringify({ type: 'games_error', message: 'Already in room' }));
+
+          if (!gameQueues[gameType]) gameQueues[gameType] = [];
+          gameQueues[gameType].push(ws);
+
+          let opponent = null;
+          for (let i = 0; i < gameQueues[gameType].length; i++) {
+            const candidate = gameQueues[gameType][i];
+            if (candidate !== ws && gamePlayers[candidate] && !gamePlayers[candidate].roomId) {
+              opponent = candidate;
+              gameQueues[gameType].splice(i, 1);
+              break;
+            }
+          }
+
+          if (opponent) {
+            const roomId = 'game_' + Date.now();
+            const initialState = getInitialGameState(gameType);
+            gameRooms[roomId] = {
+              gameType: gameType,
+              players: {
+                [gamePlayers[ws].username]: ws,
+                [gamePlayers[opponent].username]: opponent
+              },
+              state: initialState,
+              turn: gamePlayers[ws].username,
+              gameOver: false,
+              winner: null
+            };
+            gamePlayers[ws].roomId = roomId;
+            gamePlayers[opponent].roomId = roomId;
+
+            ws.send(JSON.stringify({
+              type: 'games_room_created',
+              roomId: roomId,
+              gameType: gameType,
+              state: initialState,
+              turn: gamePlayers[ws].username
+            }));
+            opponent.send(JSON.stringify({
+              type: 'games_room_joined',
+              roomId: roomId,
+              gameType: gameType,
+              state: initialState,
+              turn: gamePlayers[ws].username
+            }));
+            broadcastGameState(roomId);
+          } else {
+            ws.send(JSON.stringify({ type: 'games_room_created', roomId: 'waiting', gameType: gameType, waiting: true }));
+          }
+          break;
+        }
+
+        case 'games_join_room': {
+          const roomIdToJoin = msg.roomId;
+          const joiner = gamePlayers[ws];
+          if (!joiner) return;
+          if (joiner.roomId) return;
+          const room = gameRooms[roomIdToJoin];
+          if (!room) return ws.send(JSON.stringify({ type: 'games_error', message: 'Room not found' }));
+          if (Object.keys(room.players).length >= 2) return ws.send(JSON.stringify({ type: 'games_error', message: 'Room full' }));
+
+          room.players[joiner.username] = ws;
+          joiner.roomId = roomIdToJoin;
+          ws.send(JSON.stringify({
+            type: 'games_room_joined',
+            roomId: roomIdToJoin,
+            gameType: room.gameType,
+            state: room.state,
+            turn: room.turn
+          }));
+          broadcastGameState(roomIdToJoin);
+          break;
+        }
+
+        case 'games_move': {
+          const roomIdMove = msg.roomId;
+          const moveRoom = gameRooms[roomIdMove];
+          if (!moveRoom) return;
+          if (moveRoom.gameOver) return;
+          if (moveRoom.turn !== gamePlayers[ws].username) return ws.send(JSON.stringify({ type: 'games_error', message: 'Not your turn' }));
+
+          const newState = processMove(moveRoom.gameType, moveRoom.state, msg.move, gamePlayers[ws].username);
+          if (!newState) return ws.send(JSON.stringify({ type: 'games_error', message: 'Invalid move' }));
+
+          moveRoom.state = newState;
+          const gameResult = checkGameOver(moveRoom.gameType, moveRoom.state);
+          if (gameResult) {
+            moveRoom.gameOver = true;
+            moveRoom.winner = gameResult.winner;
+            broadcastGameState(roomIdMove);
+            setTimeout(() => {
+              delete gameRooms[roomIdMove];
+              Object.keys(gamePlayers).forEach(key => {
+                if (gamePlayers[key].roomId === roomIdMove) gamePlayers[key].roomId = null;
+              });
+            }, 10000);
+            return;
+          }
+
+          const players = Object.keys(moveRoom.players);
+          const currentPlayer = moveRoom.turn;
+          const nextPlayer = players[0] === currentPlayer ? players[1] : players[0];
+          moveRoom.turn = nextPlayer;
+          broadcastGameState(roomIdMove);
+          break;
+        }
+
+        case 'games_leave_room': {
+          const leaveRoomId = msg.roomId;
+          const leaver = gamePlayers[ws];
+          if (!leaver || leaver.roomId !== leaveRoomId) return;
+          const leaveRoom = gameRooms[leaveRoomId];
+          if (leaveRoom) {
+            leaveRoom.gameOver = true;
+            leaveRoom.winner = Object.keys(leaveRoom.players).find(p => p !== leaver.username) || null;
+            broadcastGameState(leaveRoomId);
+            setTimeout(() => {
+              delete gameRooms[leaveRoomId];
+              Object.keys(gamePlayers).forEach(key => {
+                if (gamePlayers[key].roomId === leaveRoomId) gamePlayers[key].roomId = null;
+              });
+            }, 2000);
+          }
+          leaver.roomId = null;
+          break;
+        }
+
+        case 'games_chat': {
+          const chatRoomId = msg.roomId;
+          const chatRoom = gameRooms[chatRoomId];
+          if (!chatRoom) return;
+          const chatSender = gamePlayers[ws];
+          if (!chatSender) return;
+          Object.keys(chatRoom.players).forEach(name => {
+            const p = chatRoom.players[name];
+            if (p !== ws) {
+              p.send(JSON.stringify({ type: 'games_chat', from: chatSender.username, text: msg.text }));
+            }
+          });
+          break;
+        }
+
+        case 'games_resign': {
+          const resignRoomId = msg.roomId;
+          const resigner = gamePlayers[ws];
+          if (!resigner || resigner.roomId !== resignRoomId) return;
+          const resignRoom = gameRooms[resignRoomId];
+          if (!resignRoom) return;
+          resignRoom.gameOver = true;
+          resignRoom.winner = Object.keys(resignRoom.players).find(p => p !== resigner.username) || null;
+          broadcastGameState(resignRoomId);
+          setTimeout(() => {
+            delete gameRooms[resignRoomId];
+            Object.keys(gamePlayers).forEach(key => {
+              if (gamePlayers[key].roomId === resignRoomId) gamePlayers[key].roomId = null;
+            });
+          }, 2000);
+          break;
+        }
+
+        case 'games_new_round': {
+          const newRoundRoomId = msg.roomId;
+          const newRoundRoom = gameRooms[newRoundRoomId];
+          if (!newRoundRoom) return;
+          const roundPlayers = Object.keys(newRoundRoom.players);
+          if (roundPlayers.length < 2) return;
+          const newRoundState = getInitialGameState(newRoundRoom.gameType);
+          newRoundRoom.state = newRoundState;
+          newRoundRoom.turn = roundPlayers[0];
+          newRoundRoom.gameOver = false;
+          newRoundRoom.winner = null;
+          broadcastGameState(newRoundRoomId);
+          break;
+        }
         case 'create_private_chat': await createPrivateChat(currentUser, msg.target); break;
         case 'create_group': await createGroup(currentUser, msg.name); break;
         case 'create_channel': await createChannel(currentUser, msg.name); break;
@@ -1147,353 +1353,213 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// ====== ИГРЫ (SKYGAMES) ======
-const gameRooms = {}; // roomId -> { gameType, players: [ws1, ws2], state, turn, gameOver }
-const gameQueues = {}; // gameType -> [ws]
-const gamePlayers = {}; // ws -> { username, roomId }
+// ====== ШАХМАТЫ (SkyChess) ======
+const chessGames = {}; // gameId -> { players: [ws1, ws2], game: Chess instance }
+const chessSearchQueue = []; // игроки в поиске
+const chessPlayers = {}; // ws -> { username, status }
 
-// Добавьте эти case'ы в ws.on('message'):
+// В обработчике ws.on('message') добавьте эти case'ы:
 
-case 'games_auth':
-  const { token: gamesToken, username: gamesUsername } = msg;
-  const decodedGames = verifyJWT(gamesToken);
-  if (decodedGames && decodedGames.login) {
-    gamePlayers[ws] = { username: decodedGames.login, roomId: null };
-    ws.send(JSON.stringify({ type: 'games_auth_ok' }));
+case 'chess_auth':
+  // Авторизация в шахматах (используем токен из сообщения)
+  const { token: chessToken, username: chessUsername } = msg;
+  // Проверяем токен через verifyJWT
+  const decoded = verifyJWT(chessToken);
+  if (decoded && decoded.login) {
+    chessPlayers[ws] = { username: decoded.login, status: 'idle' };
+    ws.send(JSON.stringify({ type: 'chess_auth_ok' }));
+    // Отправляем список игроков
+    broadcastChessPlayers();
   } else {
-    ws.send(JSON.stringify({ type: 'games_error', message: 'Auth failed' }));
+    ws.send(JSON.stringify({ type: 'chess_error', message: 'Auth failed' }));
   }
   break;
 
-case 'games_list_rooms':
-  const roomList = Object.keys(gameRooms).map(id => {
-    const r = gameRooms[id];
-    return {
-      roomId: id,
-      gameType: r.gameType,
-      players: Object.keys(r.players || {}),
-      state: r.state
-    };
-  });
-  ws.send(JSON.stringify({ type: 'games_room_list', rooms: roomList }));
-  break;
-
-case 'games_create_room':
-  const gameType = msg.gameType;
-  const playerInfo = gamePlayers[ws];
-  if (!playerInfo) return ws.send(JSON.stringify({ type: 'games_error', message: 'Not authorized' }));
-  if (playerInfo.roomId) return ws.send(JSON.stringify({ type: 'games_error', message: 'Already in room' }));
-
-  // Проверяем, есть ли очередь для этой игры
-  if (!gameQueues[gameType]) gameQueues[gameType] = [];
-  gameQueues[gameType].push(ws);
-
-  // Ищем соперника
-  let opponent = null;
-  for (let i = 0; i < gameQueues[gameType].length; i++) {
-    const candidate = gameQueues[gameType][i];
-    if (candidate !== ws && gamePlayers[candidate] && !gamePlayers[candidate].roomId) {
-      opponent = candidate;
-      gameQueues[gameType].splice(i, 1);
-      break;
-    }
-  }
-
-  if (opponent) {
-    // Создаём игру
-    const roomId = 'game_' + Date.now();
-    const initialState = getInitialGameState(gameType);
-    gameRooms[roomId] = {
-      gameType: gameType,
-      players: {
-        [gamePlayers[ws].username]: ws,
-        [gamePlayers[opponent].username]: opponent
-      },
-      state: initialState,
-      turn: gamePlayers[ws].username,
-      gameOver: false,
-      winner: null
-    };
-    gamePlayers[ws].roomId = roomId;
-    gamePlayers[opponent].roomId = roomId;
-
-    ws.send(JSON.stringify({
-      type: 'games_room_created',
-      roomId: roomId,
-      gameType: gameType,
-      state: initialState,
-      turn: gamePlayers[ws].username
-    }));
-    opponent.send(JSON.stringify({
-      type: 'games_room_joined',
-      roomId: roomId,
-      gameType: gameType,
-      state: initialState,
-      turn: gamePlayers[ws].username
-    }));
-    broadcastGameState(roomId);
-  } else {
-    // Ждём соперника
-    ws.send(JSON.stringify({ type: 'games_room_created', roomId: 'waiting', gameType: gameType, waiting: true }));
-  }
-  break;
-
-case 'games_join_room':
-  const roomIdToJoin = msg.roomId;
-  const joiner = gamePlayers[ws];
-  if (!joiner) return;
-  if (joiner.roomId) return;
-  const room = gameRooms[roomIdToJoin];
-  if (!room) return ws.send(JSON.stringify({ type: 'games_error', message: 'Room not found' }));
-  if (Object.keys(room.players).length >= 2) return ws.send(JSON.stringify({ type: 'games_error', message: 'Room full' }));
-
-  room.players[joiner.username] = ws;
-  joiner.roomId = roomIdToJoin;
-  ws.send(JSON.stringify({
-    type: 'games_room_joined',
-    roomId: roomIdToJoin,
-    gameType: room.gameType,
-    state: room.state,
-    turn: room.turn
+case 'chess_get_players':
+  // Отправляем список всех игроков
+  const playersList = Object.values(chessPlayers).map(p => ({
+    username: p.username,
+    status: p.status || 'idle'
   }));
-  broadcastGameState(roomIdToJoin);
+  ws.send(JSON.stringify({ type: 'chess_players_list', players: playersList }));
   break;
 
-case 'games_move':
-  const roomIdMove = msg.roomId;
-  const moveRoom = gameRooms[roomIdMove];
-  if (!moveRoom) return;
-  if (moveRoom.gameOver) return;
-  if (moveRoom.turn !== gamePlayers[ws].username) return ws.send(JSON.stringify({ type: 'games_error', message: 'Not your turn' }));
+case 'chess_find_game':
+  const player = chessPlayers[ws];
+  if (!player) return;
+  if (player.status === 'searching') return;
 
-  // Обрабатываем ход в зависимости от игры
-  const newState = processMove(moveRoom.gameType, moveRoom.state, msg.move, gamePlayers[ws].username);
-  if (!newState) return ws.send(JSON.stringify({ type: 'games_error', message: 'Invalid move' }));
+  // Ищем соперника в очереди
+  if (chessSearchQueue.length > 0) {
+    const opponentWs = chessSearchQueue.shift();
+    const opponent = chessPlayers[opponentWs];
+    if (!opponent || opponentWs === ws) {
+      chessSearchQueue.push(ws);
+      return;
+    }
 
-  moveRoom.state = newState;
-  // Проверяем окончание игры
-  const gameResult = checkGameOver(moveRoom.gameType, moveRoom.state);
-  if (gameResult) {
-    moveRoom.gameOver = true;
-    moveRoom.winner = gameResult.winner;
-    broadcastGameState(roomIdMove);
-    // Удаляем комнату через 10 секунд
-    setTimeout(() => {
-      delete gameRooms[roomIdMove];
-      Object.keys(gamePlayers).forEach(key => {
-        if (gamePlayers[key].roomId === roomIdMove) gamePlayers[key].roomId = null;
-      });
-    }, 10000);
+    // Создаём игру
+    const gameId = 'chess_' + Date.now();
+    const game = new Chess();
+    chessGames[gameId] = {
+      players: [ws, opponentWs],
+      game: game,
+      turn: 'w',
+      moveHistory: []
+    };
+
+    // Устанавливаем статусы
+    player.status = 'playing';
+    opponent.status = 'playing';
+
+    // Отправляем обоим игрокам
+    ws.send(JSON.stringify({
+      type: 'chess_game_found',
+      gameId: gameId,
+      color: 'w'
+    }));
+    opponentWs.send(JSON.stringify({
+      type: 'chess_game_found',
+      gameId: gameId,
+      color: 'b'
+    }));
+
+    broadcastChessPlayers();
+  } else {
+    // Добавляем в очередь
+    chessSearchQueue.push(ws);
+    player.status = 'searching';
+    ws.send(JSON.stringify({ type: 'chess_search_started' }));
+    broadcastChessPlayers();
+  }
+  break;
+
+case 'chess_cancel_search':
+  const cancellingPlayer = chessPlayers[ws];
+  if (cancellingPlayer && cancellingPlayer.status === 'searching') {
+    const index = chessSearchQueue.indexOf(ws);
+    if (index !== -1) chessSearchQueue.splice(index, 1);
+    cancellingPlayer.status = 'idle';
+    ws.send(JSON.stringify({ type: 'chess_search_cancelled' }));
+    broadcastChessPlayers();
+  }
+  break;
+
+case 'chess_move':
+  const moveData = msg.move;
+  const chessGame = chessGames[msg.gameId];
+  if (!chessGame) return;
+
+  // Проверяем, чей ход
+  const currentPlayer = chessGame.game.turn() === 'w' ? chessGame.players[0] : chessGame.players[1];
+  if (currentPlayer !== ws) {
+    ws.send(JSON.stringify({ type: 'chess_error', message: 'Not your turn' }));
     return;
   }
 
-  // Меняем ход
-  const players = Object.keys(moveRoom.players);
-  const currentPlayer = moveRoom.turn;
-  const nextPlayer = players[0] === currentPlayer ? players[1] : players[0];
-  moveRoom.turn = nextPlayer;
-
-  broadcastGameState(roomIdMove);
-  break;
-
-case 'games_leave_room':
-  const leaveRoomId = msg.roomId;
-  const leaver = gamePlayers[ws];
-  if (!leaver || leaver.roomId !== leaveRoomId) return;
-  const leaveRoom = gameRooms[leaveRoomId];
-  if (leaveRoom) {
-    leaveRoom.gameOver = true;
-    leaveRoom.winner = Object.keys(leaveRoom.players).find(p => p !== leaver.username) || null;
-    broadcastGameState(leaveRoomId);
-    setTimeout(() => {
-      delete gameRooms[leaveRoomId];
-      Object.keys(gamePlayers).forEach(key => {
-        if (gamePlayers[key].roomId === leaveRoomId) gamePlayers[key].roomId = null;
-      });
-    }, 2000);
+  const result = chessGame.game.move(moveData);
+  if (result === null) {
+    ws.send(JSON.stringify({ type: 'chess_error', message: 'Invalid move' }));
+    return;
   }
-  leaver.roomId = null;
+
+  // Отправляем ход сопернику
+  const opponent = chessGame.players[0] === ws ? chessGame.players[1] : chessGame.players[0];
+  opponent.send(JSON.stringify({
+    type: 'chess_move',
+    move: result
+  }));
+
+  // Проверяем окончание игры
+  if (chessGame.game.in_checkmate()) {
+    const winner = chessGame.game.turn() === 'w' ? 'чёрные' : 'белые';
+    const resultMsg = `🏁 Мат! Победили ${winner}`;
+    chessGame.players.forEach(p => {
+      p.send(JSON.stringify({ type: 'chess_game_over', result: resultMsg }));
+    });
+    delete chessGames[msg.gameId];
+    Object.keys(chessPlayers).forEach(key => {
+      const p = chessPlayers[key];
+      if (p.status === 'playing') p.status = 'idle';
+    });
+    broadcastChessPlayers();
+  } else if (chessGame.game.in_draw()) {
+    chessGame.players.forEach(p => {
+      p.send(JSON.stringify({ type: 'chess_game_over', result: '🤝 Ничья' }));
+    });
+    delete chessGames[msg.gameId];
+    Object.keys(chessPlayers).forEach(key => {
+      const p = chessPlayers[key];
+      if (p.status === 'playing') p.status = 'idle';
+    });
+    broadcastChessPlayers();
+  }
   break;
 
-case 'games_chat':
-  const chatRoomId = msg.roomId;
-  const chatRoom = gameRooms[chatRoomId];
-  if (!chatRoom) return;
-  const chatSender = gamePlayers[ws];
+case 'chess_resign':
+  const resignGame = chessGames[msg.gameId];
+  if (!resignGame) return;
+  const resigningPlayer = resignGame.players[0] === ws ? 'белые' : 'чёрные';
+  const winner = resigningPlayer === 'белые' ? 'чёрные' : 'белые';
+  const resignMsg = `🏳️ ${resigningPlayer} сдались. Победили ${winner}`;
+  resignGame.players.forEach(p => {
+    p.send(JSON.stringify({ type: 'chess_game_over', result: resignMsg }));
+  });
+  delete chessGames[msg.gameId];
+  Object.keys(chessPlayers).forEach(key => {
+    const p = chessPlayers[key];
+    if (p.status === 'playing') p.status = 'idle';
+  });
+  broadcastChessPlayers();
+  break;
+
+case 'chess_leave_game':
+  const leaveGame = chessGames[msg.gameId];
+  if (leaveGame) {
+    leaveGame.players.forEach(p => {
+      if (p !== ws) {
+        p.send(JSON.stringify({
+          type: 'chess_game_over',
+          result: 'Соперник покинул игру'
+        }));
+      }
+    });
+    delete chessGames[msg.gameId];
+    Object.keys(chessPlayers).forEach(key => {
+      const p = chessPlayers[key];
+      if (p.status === 'playing') p.status = 'idle';
+    });
+    broadcastChessPlayers();
+  }
+  break;
+
+case 'chess_chat':
+  const chatGame = chessGames[msg.gameId];
+  if (!chatGame) return;
+  const chatSender = chessPlayers[ws];
   if (!chatSender) return;
-  Object.keys(chatRoom.players).forEach(name => {
-    const p = chatRoom.players[name];
+  chatGame.players.forEach(p => {
     if (p !== ws) {
-      p.send(JSON.stringify({ type: 'games_chat', from: chatSender.username, text: msg.text }));
+      p.send(JSON.stringify({
+        type: 'chess_chat',
+        from: chatSender.username,
+        text: msg.text
+      }));
     }
   });
   break;
 
-case 'games_resign':
-  const resignRoomId = msg.roomId;
-  const resigner = gamePlayers[ws];
-  if (!resigner || resigner.roomId !== resignRoomId) return;
-  const resignRoom = gameRooms[resignRoomId];
-  if (!resignRoom) return;
-  resignRoom.gameOver = true;
-  resignRoom.winner = Object.keys(resignRoom.players).find(p => p !== resigner.username) || null;
-  broadcastGameState(resignRoomId);
-  setTimeout(() => {
-    delete gameRooms[resignRoomId];
-    Object.keys(gamePlayers).forEach(key => {
-      if (gamePlayers[key].roomId === resignRoomId) gamePlayers[key].roomId = null;
-    });
-  }, 2000);
-  break;
-
-case 'games_new_round':
-  const newRoundRoomId = msg.roomId;
-  const newRoundRoom = gameRooms[newRoundRoomId];
-  if (!newRoundRoom) return;
-  const roundPlayers = Object.keys(newRoundRoom.players);
-  if (roundPlayers.length < 2) return;
-  const newRoundState = getInitialGameState(newRoundRoom.gameType);
-  newRoundRoom.state = newRoundState;
-  newRoundRoom.turn = roundPlayers[0];
-  newRoundRoom.gameOver = false;
-  newRoundRoom.winner = null;
-  broadcastGameState(newRoundRoomId);
-  break;
-
-// ====== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======
-function getInitialGameState(gameType) {
-  switch (gameType) {
-    case 'tictac': return { board: Array(9).fill(null) };
-    case 'hangman': {
-      const words = ['cloud', 'castle', 'knight', 'dragon', 'tower', 'sword', 'shield', 'prince', 'queen', 'king', 'army', 'forest', 'river', 'mountain', 'ocean', 'sunset', 'moonlight', 'star', 'galaxy', 'universe'];
-      const word = words[Math.floor(Math.random() * words.length)];
-      return { word: word, guessed: [], wrong: 0 };
+// Функция для рассылки списка игроков
+function broadcastChessPlayers() {
+  const list = Object.keys(chessPlayers).map(key => {
+    const p = chessPlayers[key];
+    return { username: p.username, status: p.status || 'idle' };
+  });
+  Object.keys(chessPlayers).forEach(key => {
+    const ws = key;
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'chess_players_list', players: list }));
     }
-    case 'battleship': {
-      const board = Array(100).fill(null);
-      const ships = [
-        { size: 5, placed: false },
-        { size: 4, placed: false },
-        { size: 3, placed: false },
-        { size: 3, placed: false },
-        { size: 2, placed: false }
-      ];
-      // Простая расстановка (для прототипа)
-      let index = 0;
-      ships.forEach(ship => {
-        let placed = false;
-        for (let attempts = 0; attempts < 100 && !placed; attempts++) {
-          const start = Math.floor(Math.random() * 100);
-          const dir = Math.random() > 0.5 ? 1 : 10; // горизонтально или вертикально
-          let valid = true;
-          for (let i = 0; i < ship.size; i++) {
-            const pos = start + i * dir;
-            if (pos >= 100 || board[pos] !== null) { valid = false; break; }
-            if (dir === 1 && Math.floor(pos / 10) !== Math.floor(start / 10)) { valid = false; break; }
-          }
-          if (valid) {
-            for (let i = 0; i < ship.size; i++) {
-              board[start + i * dir] = 'ship';
-            }
-            placed = true;
-          }
-        }
-      });
-      return { board, hits: [], ships, playerShips: [] };
-    }
-    case 'guess': return { secret: Math.floor(Math.random() * 100) + 1, lastGuess: null, hint: '', attempts: 0 };
-    default: return {};
-  }
-}
-
-function processMove(gameType, state, move, player) {
-  switch (gameType) {
-    case 'tictac': {
-      const board = state.board;
-      if (move.index === undefined || move.index < 0 || move.index > 8) return null;
-      if (board[move.index]) return null;
-      const symbol = player === Object.keys(gameRooms[Object.keys(gameRooms).find(id => {
-        const r = gameRooms[id];
-        return r.state === state && r.players[player];
-      })]?.players ? 'X' : 'O') || 'X';
-      board[move.index] = symbol;
-      return { board };
-    }
-    case 'hangman': {
-      const letter = move.letter.toLowerCase();
-      if (!letter || letter.length !== 1) return null;
-      if (state.guessed.includes(letter)) return null;
-      const guessed = [...state.guessed, letter];
-      const wrong = state.word.includes(letter) ? state.wrong : state.wrong + 1;
-      return { ...state, guessed, wrong };
-    }
-    case 'battleship': {
-      const index = move.index;
-      if (index === undefined || index < 0 || index > 99) return null;
-      if (state.hits.includes(index)) return null;
-      const hits = [...state.hits, index];
-      return { ...state, hits };
-    }
-    case 'guess': {
-      const guess = move.guess;
-      if (guess === undefined || guess < 1 || guess > 100) return null;
-      const secret = state.secret;
-      let hint = '';
-      if (guess === secret) hint = '🎉 Правильно!';
-      else if (guess < secret) hint = '📈 Больше';
-      else hint = '📉 Меньше';
-      return { ...state, lastGuess: guess, hint, attempts: state.attempts + 1 };
-    }
-    default: return null;
-  }
-}
-
-function checkGameOver(gameType, state) {
-  switch (gameType) {
-    case 'tictac': {
-      const board = state.board;
-      const winPatterns = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
-      for (const p of winPatterns) {
-        if (board[p[0]] && board[p[0]] === board[p[1]] && board[p[1]] === board[p[2]]) {
-          return { winner: board[p[0]] === 'X' ? 'Игрок 1' : 'Игрок 2' };
-        }
-      }
-      if (board.every(c => c !== null)) return { winner: null };
-      return null;
-    }
-    case 'hangman': {
-      if (state.wrong >= 6) return { winner: 'Игрок 2' };
-      if (state.word.split('').every(ch => state.guessed.includes(ch))) return { winner: 'Игрок 1' };
-      return null;
-    }
-    case 'battleship': {
-      // Простая проверка (для прототипа): если все клетки с кораблями подбиты
-      const board = state.board;
-      const hits = state.hits || [];
-      const allShips = board.map((cell, i) => cell === 'ship' ? i : null).filter(i => i !== null);
-      const allHit = allShips.every(i => hits.includes(i));
-      if (allHit) return { winner: 'Игрок 1' };
-      return null;
-    }
-    case 'guess': {
-      if (state.hint === '🎉 Правильно!') return { winner: 'Игрок 1' };
-      return null;
-    }
-    default: return null;
-  }
-}
-
-function broadcastGameState(roomId) {
-  const room = gameRooms[roomId];
-  if (!room) return;
-  Object.keys(room.players).forEach(name => {
-    const p = room.players[name];
-    p.send(JSON.stringify({
-      type: 'games_state_update',
-      state: room.state,
-      turn: room.turn,
-      gameOver: room.gameOver
-    }));
   });
 }
 // ====== ПУБЛИЧНАЯ СТАТИСТИКА (для всех) ======
