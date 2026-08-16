@@ -1146,5 +1146,114 @@ app.get('/api/search', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// ====== ПУБЛИЧНАЯ СТАТИСТИКА (для всех) ======
+app.get('/api/stats/public', async (req, res) => {
+  try {
+    // Подсчёт пользователей
+    const users = await dbList('skyid_users');
+    const totalUsers = users.length;
+
+    // Подсчёт сообщений (из всех чатов)
+    const chatIds = await dbList('chats');
+    let totalMessages = 0;
+    for (const id of chatIds) {
+      const chat = await dbGet('chats', id);
+      if (chat && chat.messages) {
+        totalMessages += chat.messages.length;
+      }
+    }
+
+    // Подсчёт видео (если есть папка videos в SkyMutant, иначе 0)
+    let totalVideos = 0;
+    try {
+      const videoIds = await dbList('videos');
+      totalVideos = videoIds.length;
+    } catch (e) {
+      // Если папки нет — просто игнорируем
+    }
+
+    // Загружаем аналитику из файла analytics.json
+    const ANALYTICS_FILE = path.join(DATA_DIR, 'analytics.json');
+    let analytics = { pages: {}, devices: {}, countries: {}, hourly: {} };
+    try {
+      const content = await fs.readFile(ANALYTICS_FILE, 'utf-8');
+      analytics = JSON.parse(content);
+    } catch (e) {
+      // Если файла нет — используем пустую аналитику
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+
+    // Собираем данные за последние 30 дней
+    const last30Days = [];
+    for (let i = 0; i < 30; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      last30Days.push(d.toISOString().split('T')[0]);
+    }
+
+    // Общее число визитов за 30 дней
+    let totalVisits = 0;
+    const dailyActivity = [];
+    for (const day of last30Days) {
+      const dayData = analytics.pages[day] || {};
+      const visits = Object.values(dayData).reduce((a, b) => a + b, 0);
+      totalVisits += visits;
+      dailyActivity.push({ date: day, visits });
+    }
+
+    // Устройства (агрегировано)
+    const devices = {};
+    for (const day of last30Days) {
+      const dayDevices = analytics.devices[day] || {};
+      for (const [type, count] of Object.entries(dayDevices)) {
+        devices[type] = (devices[type] || 0) + count;
+      }
+    }
+    const deviceList = Object.entries(devices).map(([type, count]) => ({ type, count }));
+
+    // Страны (топ-5)
+    const countries = {};
+    for (const day of last30Days) {
+      const dayCountries = analytics.countries[day] || {};
+      for (const [country, count] of Object.entries(dayCountries)) {
+        countries[country] = (countries[country] || 0) + count;
+      }
+    }
+    const topCountries = Object.entries(countries)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([country, count]) => ({ country, count }));
+
+    // Пиковые часы (топ-3)
+    const hourly = {};
+    for (const day of last30Days) {
+      const dayHourly = analytics.hourly[day] || {};
+      for (const [hour, count] of Object.entries(dayHourly)) {
+        hourly[hour] = (hourly[hour] || 0) + count;
+      }
+    }
+    const peakHours = Object.entries(hourly)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([hour, count]) => ({ hour: parseInt(hour), count }));
+
+    // Отправляем ответ
+    res.json({
+      totalUsers,
+      totalMessages,
+      totalVideos,
+      totalVisits,
+      dailyActivity: dailyActivity.reverse(), // чтобы шли в хронологическом порядке
+      devices: deviceList,
+      topCountries,
+      peakHours,
+      updatedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('Ошибка в /api/stats/public:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
