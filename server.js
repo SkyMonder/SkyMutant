@@ -11,6 +11,8 @@ const multer = require('multer');
 const cheerio = require('cheerio');
 const NodeCache = require('node-cache');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const cookieParser = require('cookie-parser');
 
 const app = express();
 
@@ -39,12 +41,24 @@ app.get('/ban.html', (req, res) => {
   res.sendFile(path.join(__dirname, 'ban.html'));
 });
 
+app.use(cookieParser());
+
 // ====== ФУНКЦИЯ ПОЛУЧЕНИЯ IP ======
 function getClientIP(req) {
   const forwarded = req.headers['x-forwarded-for'];
   const ip = forwarded ? forwarded.split(',')[0].trim() : req.socket.remoteAddress;
   return ip.split(':')[0];
 }
+
+// ====== Rate Limiting ======
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === '/healthix'
+});
+app.use(limiter);
 
 // ====== РАБОТА С banned_ips.json ======
 const DATA_DIR = path.join(__dirname, 'data');
@@ -201,6 +215,22 @@ function verifyJWT(token) {
   }
 }
 
+// ====== CSRF Helpers ======
+const CSRF_SECRET = process.env.CSRF_SECRET || crypto.randomBytes(32).toString('hex');
+
+function generateCSRFToken(skyid) {
+  return jwt.sign({ skyid, exp: Date.now() + 3600000 }, CSRF_SECRET, { expiresIn: '1h' });
+}
+
+function verifyCSRFToken(token, skyid) {
+  try {
+    const decoded = jwt.verify(token, CSRF_SECRET);
+    return decoded.skyid === skyid;
+  } catch (e) {
+    return false;
+  }
+}
+
 // ---------- Загрузка файлов ----------
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fsSync.existsSync(uploadDir)) fsSync.mkdirSync(uploadDir, { recursive: true });
@@ -280,86 +310,73 @@ app.get('/checkvizit', async (req, res) => {
 
 // ========== Аутентификация ==========
 app.post('/register', async (req, res) => {
-  const { data } = req.body;
-  if (!data) return res.status(400).json({ error: 'No data' });
-  try {
-    const payload = await decryptClientPayload(data);
-    const { login, password } = payload;
-    if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
-    if (await getCachedUser(login)) return res.status(409).json({ error: 'User exists' });
-    const salt = crypto.randomBytes(16).toString('base64');
-    const hash = await new Promise((resolve, reject) => {
-      crypto.pbkdf2(password, salt, 10000, 64, 'sha512', (err, derivedKey) => {
-        if (err) reject(err);
-        else resolve(derivedKey.toString('hex'));
-      });
+  const { login, password } = req.body;
+  if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
+  if (await getCachedUser(login)) return res.status(409).json({ error: 'User exists' });
+  const salt = crypto.randomBytes(16).toString('base64');
+  const hash = await new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, 10000, 64, 'sha512', (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey.toString('hex'));
     });
-    const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
-    const token = crypto.randomBytes(32).toString('hex');
-    const jwtToken = generateJWT({ skyid, login });
-    await dbPut('skyid_users', login, { skyid, login, salt, hash, token });
-    userCache.set(login, { skyid, login, salt, hash, token });
-    await saveToken(token, login, 7*24*3600);
-    if (skyidIndex) skyidIndex.set(skyid, login);
-    if (!(await dbGet('chat_users', login))) {
-      await dbPut('chat_users', login, { salt, name: login, avatar: '', status: 'online' });
-    }
-    const enc = await encryptClientResponse({ skyid, token, jwt: jwtToken });
-    res.json({ data: enc });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
+  });
+  const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
+  const token = crypto.randomBytes(32).toString('hex');
+  const jwtToken = generateJWT({ skyid, login });
+  await dbPut('skyid_users', login, { skyid, login, salt, hash, token });
+  userCache.set(login, { skyid, login, salt, hash, token });
+  await saveToken(token, login, 7*24*3600);
+  if (skyidIndex) skyidIndex.set(skyid, login);
+  if (!(await dbGet('chat_users', login))) {
+    await dbPut('chat_users', login, { salt, name: login, avatar: '', status: 'online' });
   }
+  res.cookie('token', jwtToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 3600 * 1000
+  });
+  const csrfToken = generateCSRFToken(skyid);
+  res.json({ skyid, csrfToken });
 });
 
 app.post('/login', async (req, res) => {
-  const { data } = req.body;
-  if (!data) return res.status(400).json({ error: 'No data' });
-  try {
-    const payload = await decryptClientPayload(data);
-    const { login, password } = payload;
-    if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
-    const user = await getCachedUser(login);
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-    const hash = await new Promise((resolve, reject) => {
-      crypto.pbkdf2(password, user.salt, 10000, 64, 'sha512', (err, derivedKey) => {
-        if (err) reject(err);
-        else resolve(derivedKey.toString('hex'));
-      });
+  const { login, password } = req.body;
+  if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
+  const user = await getCachedUser(login);
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  const hash = await new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, user.salt, 10000, 64, 'sha512', (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey.toString('hex'));
     });
-    if (hash !== user.hash) return res.status(401).json({ error: 'Invalid credentials' });
-    const newToken = crypto.randomBytes(32).toString('hex');
-    const jwtToken = generateJWT({ skyid: user.skyid, login });
-    user.token = newToken;
-    await dbPut('skyid_users', login, user);
-    userCache.set(login, user);
-    await saveToken(newToken, login, 7*24*3600);
-    const enc = await encryptClientResponse({ skyid: user.skyid, token: newToken, jwt: jwtToken });
-    res.json({ data: enc });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
+  });
+  if (hash !== user.hash) return res.status(401).json({ error: 'Invalid credentials' });
+  const newToken = crypto.randomBytes(32).toString('hex');
+  const jwtToken = generateJWT({ skyid: user.skyid, login });
+  user.token = newToken;
+  await dbPut('skyid_users', login, user);
+  userCache.set(login, user);
+  await saveToken(newToken, login, 7*24*3600);
+  res.cookie('token', jwtToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 3600 * 1000
+  });
+  const csrfToken = generateCSRFToken(user.skyid);
+  res.json({ skyid: user.skyid, csrfToken });
 });
 
-app.post('/verify', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.replace('Bearer ', '') || req.body.token;
-  if (!token) return res.status(400).json({ error: 'Token required' });
+app.get('/verify', async (req, res) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ error: 'No token' });
   const decoded = verifyJWT(token);
-  if (decoded) {
-    const user = await getUserBySkyid(decoded.skyid);
-    if (user) {
-      return res.json({ skyid: decoded.skyid, login: decoded.login });
-    }
-  }
-  const tokenData = await getTokenData(token);
-  if (!tokenData) return res.status(401).json({ error: 'Invalid token' });
-  if (tokenData.expires < Date.now()) {
-    await deleteToken(token);
-    return res.status(401).json({ error: 'Token expired' });
-  }
-  const user = await getCachedUser(tokenData.login);
+  if (!decoded) return res.status(401).json({ error: 'Invalid token' });
+  const user = await getUserBySkyid(decoded.skyid);
   if (!user) return res.status(401).json({ error: 'User not found' });
-  res.json({ skyid: user.skyid, login: user.login });
+  const csrfToken = generateCSRFToken(user.skyid);
+  res.json({ skyid: user.skyid, login: user.login, csrfToken });
 });
 
 // ========== Чат-регистрация ==========
@@ -876,7 +893,8 @@ wss.on('connection', (ws, req) => {
         case 'get_chats': await sendChatList(currentUser); break;
         case 'get_messages': await handleGetMessages(ws, currentUser, msg.chatId); break;
         case 'send_message':
-          await handleSendMessage(currentUser, msg.chatId, msg.text, null, ws.ip);
+  // принимаем encrypted вместо text
+          await handleSendMessage(currentUser, msg.chatId, null, msg.encrypted, null, ws.ip);
           break;
         case 'file_message':
           await handleSendMessage(currentUser, msg.chatId, msg.text, msg.file, ws.ip);
@@ -1548,5 +1566,61 @@ app.get('/gaverify', async (req, res) => {
     return res.status(401).json({ error: 'User not found' });
   }
   res.json({ skyid: user.skyid, login: user.login });
+});
+
+// ====== Middleware для проверки авторизации (из куки) ======
+async function verifyToken(req, res, next) {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  const decoded = verifyJWT(token);
+  if (!decoded) return res.status(401).json({ error: 'Invalid token' });
+  const user = await getUserBySkyid(decoded.skyid);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+  req.skyid = user.skyid;
+  req.login = user.login;
+  req.isAdmin = (user.login === ADMIN_LOGIN);
+  next();
+}
+
+function csrfProtect(req, res, next) {
+  const csrfToken = req.headers['x-csrf-token'];
+  if (!csrfToken) return res.status(403).json({ error: 'CSRF token missing' });
+  if (!verifyCSRFToken(csrfToken, req.skyid)) {
+    return res.status(403).json({ error: 'Invalid CSRF token' });
+  }
+  next();
+}
+
+// ====== ПУБЛИЧНЫЕ КЛЮЧИ ДЛЯ E2EE ======
+app.post('/keys/set', verifyToken, csrfProtect, async (req, res) => {
+  const { publicKey } = req.body;
+  if (!publicKey) return res.status(400).json({ error: 'publicKey required' });
+  await dbPut('user_keys', req.skyid, { skyid: req.skyid, publicKey, updatedAt: Date.now() });
+  res.json({ ok: true });
+});
+
+app.get('/keys/get', async (req, res) => {
+  const { skyid } = req.query;
+  if (!skyid) return res.status(400).json({ error: 'skyid required' });
+  const data = await dbGet('user_keys', skyid);
+  res.json({ publicKey: data ? data.publicKey : null });
+});
+
+// ====== МОДЕРАЦИЯ (серверная) ======
+const BANNED_WORDS = [
+  'террорист', 'терракт', 'взорвать', 'взрыв', 'бомба', 'оружие', 'стрельба',
+  'убить', 'насилие', 'экстремизм', 'диверсия', 'исламское государство', 'игил',
+  'захват', 'заложник', 'смертник', 'шахид', 'джихад', 'наркотик',
+  'расчленить', 'отрезать', 'пытать', 'насиловать', 'педофил', 'педофилия',
+  'украсть', 'ограбить', 'воровать', 'мошенник', 'скам', 'фишинг', 'взломать',
+  'убийство', 'самоубийство', 'суицид'
+];
+
+app.post('/moderate', async (req, res) => {
+  const { text } = req.body;
+  if (!text) return res.status(400).json({ error: 'No text' });
+  const lower = text.toLowerCase();
+  const blocked = BANNED_WORDS.some(word => lower.includes(word));
+  res.json({ blocked });
 });
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
