@@ -104,7 +104,7 @@ app.use(async (req, res, next) => {
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-upload-token']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-upload-token', 'X-CSRF-Token']
 }));
 app.options('*', cors());
 
