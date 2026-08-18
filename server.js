@@ -877,13 +877,26 @@ wss.on('connection', (ws, req) => {
     let msg;
     try { msg = JSON.parse(raw); } catch (e) { return; }
     if (msg.type === 'auth') {
-      const user = await dbGet('chat_users', msg.login);
-      if (!user) return ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
-      currentUser = msg.login;
+      const token = msg.token;
+      if (!token) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Token required' }));
+        return;
+      }
+      const decoded = verifyJWT(token);
+      if (!decoded) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Invalid token' }));
+        return;
+      }
+      const user = await getUserBySkyid(decoded.skyid);
+      if (!user) {
+        ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
+        return;
+      }
+      currentUser = user.login;
       connections[currentUser] = ws;
-      user.status = 'online';
-      await dbPut('chat_users', msg.login, user);
-      ws.send(JSON.stringify({ type: 'auth_ok', ...user, login: msg.login }));
+      const chatUser = await dbGet('chat_users', currentUser);
+      if (chatUser) { chatUser.status = 'online'; await dbPut('chat_users', currentUser, chatUser); }
+      ws.send(JSON.stringify({ type: 'auth_ok', ...chatUser, login: currentUser, skyid: user.skyid }));
       await sendChatList(currentUser);
       return;
     }
@@ -905,6 +918,16 @@ wss.on('connection', (ws, req) => {
           const all = (await dbList('chat_users')).filter(u => u !== currentUser && u.toLowerCase().includes((msg.query || '').toLowerCase()));
           ws.send(JSON.stringify({ type: 'user_search_result', users: all.map(u => ({ login: u })) }));
           break;
+        }
+
+        const banned = await loadBannedIps();
+        if (banned[ip]) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: `Ваш IP заблокирован. Вы не можете отправлять сообщения.`
+          }));
+          ws.close();
+          return;
         }
                 // ====== ИГРЫ (SKYGAMES) ======
         case 'games_auth': {
@@ -1165,26 +1188,29 @@ async function handleGetMessages(ws, user, chatId) {
   ws.send(JSON.stringify({ type: 'messages', messages: chat.messages || [] }));
 }
 
-async function handleSendMessage(user, chatId, text, file, ip) {
-  const banned = await loadBannedIps();
-  if (banned[ip]) {
-    const ws = connections[user];
-    if (ws) {
-      ws.send(JSON.stringify({
-        type: 'error',
-        message: `Ваш IP заблокирован. Вы не можете отправлять сообщения.`
-      }));
-      ws.close();
-    }
-    return;
-  }
+async function handleSendMessage(user, chatId, text, encrypted, file, ip) {
   const chat = await dbGet('chats', chatId);
   if (!chat || !chat.members.includes(user)) return;
-  const message = { id: 'msg_' + Date.now(), from: user, text: text || '', time: Date.now() };
+  const message = {
+    id: 'msg_' + Date.now(),
+    from: user,
+    time: Date.now()
+  };
+  if (encrypted) {
+    message.encrypted = encrypted;
+    const userData = await getCachedUser(user);
+    if (userData) message.fromSkyid = userData.skyid;
+  } else if (text) {
+    message.text = text;
+  } else {
+    return;
+  }
   if (file) message.file = { name: file.name, type: file.type, data: file.url || file.data, size: file.size };
+
   chat.messages = chat.messages || [];
   chat.messages.push(message);
   await dbPut('chats', chatId, chat);
+
   for (const m of chat.members) {
     if (m !== user && connections[m] && !chat.blocked?.includes(m)) {
       connections[m].send(JSON.stringify({ type: 'message', chatId, ...message }));
