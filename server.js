@@ -1549,4 +1549,62 @@ app.get('/gaverify', async (req, res) => {
   }
   res.json({ skyid: user.skyid, login: user.login });
 });
+// =============================================
+// ПРОСТЫЕ ЭНДПОИНТЫ ДЛЯ МЕССЕНДЖЕРА (JSON)
+// =============================================
+
+app.post('/smreg', async (req, res) => {
+  const { login, password } = req.body;
+  if (!login || !password) {
+    return res.status(400).json({ error: 'Login and password required' });
+  }
+  if (await getCachedUser(login)) {
+    return res.status(409).json({ error: 'User exists' });
+  }
+  const salt = crypto.randomBytes(16).toString('base64');
+  const hash = await new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, 10000, 64, 'sha512', (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey.toString('hex'));
+    });
+  });
+  const skyid = 'sid_' + crypto.randomBytes(8).toString('hex');
+  const token = crypto.randomBytes(32).toString('hex');
+  const jwtToken = generateJWT({ skyid, login });
+  await dbPut('skyid_users', login, { skyid, login, salt, hash, token });
+  userCache.set(login, { skyid, login, salt, hash, token });
+  await saveToken(token, login, 7*24*3600);
+  if (skyidIndex) skyidIndex.set(skyid, login);
+  if (!(await dbGet('chat_users', login))) {
+    await dbPut('chat_users', login, { salt, name: login, avatar: '', status: 'online' });
+  }
+  res.json({ ok: true, skyid, token, jwt: jwtToken });
+});
+
+app.post('/smlog', async (req, res) => {
+  const { login, password } = req.body;
+  if (!login || !password) {
+    return res.status(400).json({ error: 'Login and password required' });
+  }
+  const user = await getCachedUser(login);
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  const hash = await new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, user.salt, 10000, 64, 'sha512', (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey.toString('hex'));
+    });
+  });
+  if (hash !== user.hash) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  const newToken = crypto.randomBytes(32).toString('hex');
+  const jwtToken = generateJWT({ skyid: user.skyid, login });
+  user.token = newToken;
+  await dbPut('skyid_users', login, user);
+  userCache.set(login, user);
+  await saveToken(newToken, login, 7*24*3600);
+  res.json({ ok: true, skyid: user.skyid, token: newToken, jwt: jwtToken });
+});
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
