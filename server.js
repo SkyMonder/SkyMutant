@@ -1609,10 +1609,12 @@ app.post('/smlog', async (req, res) => {
 });
 // ====== УПРАВЛЕНИЕ АККАУНТОМ ======
 
-// Middleware для проверки токена из заголовка
-function verifyAuth(req, res, next) {
+// Middleware для проверки токена (async!)
+async function verifyAuth(req, res, next) {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+  
+  // Проверяем JWT
   const decoded = verifyJWT(auth);
   if (decoded) {
     const user = await getUserBySkyid(decoded.skyid);
@@ -1622,6 +1624,8 @@ function verifyAuth(req, res, next) {
       return next();
     }
   }
+  
+  // Проверяем токен из БД
   const tokenData = await getTokenData(auth);
   if (!tokenData || tokenData.expires < Date.now()) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -1719,7 +1723,6 @@ app.delete('/account/sessions', verifyAuth, async (req, res) => {
 app.delete('/account/delete', verifyAuth, async (req, res) => {
   const user = await getCachedUser(req.login);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  // Удаляем все данные пользователя
   await dbDelete('skyid_users', req.login);
   await dbDelete('chat_users', req.login);
   const tokens = await dbList('tokens');
