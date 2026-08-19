@@ -1607,4 +1607,131 @@ app.post('/smlog', async (req, res) => {
   await saveToken(newToken, login, 7*24*3600);
   res.json({ ok: true, skyid: user.skyid, token: newToken, jwt: jwtToken });
 });
+// ====== УПРАВЛЕНИЕ АККАУНТОМ ======
+
+// Middleware для проверки токена из заголовка
+function verifyAuth(req, res, next) {
+  const auth = req.headers.authorization?.replace('Bearer ', '');
+  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+  const decoded = verifyJWT(auth);
+  if (decoded) {
+    const user = await getUserBySkyid(decoded.skyid);
+    if (user) {
+      req.skyid = user.skyid;
+      req.login = user.login;
+      return next();
+    }
+  }
+  const tokenData = await getTokenData(auth);
+  if (!tokenData || tokenData.expires < Date.now()) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const user = await getCachedUser(tokenData.login);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+  req.skyid = user.skyid;
+  req.login = user.login;
+  next();
+}
+
+app.get('/account/profile', verifyAuth, async (req, res) => {
+  const user = await getCachedUser(req.login);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.json({
+    skyid: user.skyid,
+    login: user.login,
+    name: user.name || user.login,
+    created: user.created || null
+  });
+});
+
+app.post('/account/update', verifyAuth, async (req, res) => {
+  const { name, avatar } = req.body;
+  const user = await getCachedUser(req.login);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (name) user.name = name;
+  if (avatar) user.avatar = avatar;
+  await dbPut('skyid_users', req.login, user);
+  userCache.set(req.login, user);
+  res.json({ ok: true });
+});
+
+app.post('/account/change-password', verifyAuth, async (req, res) => {
+  const { newPassword } = req.body;
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'Password too short' });
+  }
+  const user = await getCachedUser(req.login);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const salt = crypto.randomBytes(16).toString('base64');
+  const hash = await new Promise((resolve, reject) => {
+    crypto.pbkdf2(newPassword, salt, 10000, 64, 'sha512', (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey.toString('hex'));
+    });
+  });
+  user.salt = salt;
+  user.hash = hash;
+  await dbPut('skyid_users', req.login, user);
+  userCache.set(req.login, user);
+  res.json({ ok: true });
+});
+
+app.get('/account/sessions', verifyAuth, async (req, res) => {
+  const tokens = await dbList('tokens');
+  const sessions = [];
+  for (const token of tokens) {
+    const data = await dbGet('tokens', token);
+    if (data && data.login === req.login) {
+      sessions.push({
+        id: token,
+        device: data.device || 'Unknown',
+        lastActive: data.lastActive || data.expires
+      });
+    }
+  }
+  res.json(sessions);
+});
+
+app.delete('/account/sessions/:tokenId', verifyAuth, async (req, res) => {
+  const tokenId = req.params.tokenId;
+  const data = await dbGet('tokens', tokenId);
+  if (!data) return res.status(404).json({ error: 'Session not found' });
+  if (data.login !== req.login) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  await dbDelete('tokens', tokenId);
+  tokenCache.del(tokenId);
+  res.json({ ok: true });
+});
+
+app.delete('/account/sessions', verifyAuth, async (req, res) => {
+  const tokens = await dbList('tokens');
+  for (const token of tokens) {
+    const data = await dbGet('tokens', token);
+    if (data && data.login === req.login) {
+      await dbDelete('tokens', token);
+      tokenCache.del(token);
+    }
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/account/delete', verifyAuth, async (req, res) => {
+  const user = await getCachedUser(req.login);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  // Удаляем все данные пользователя
+  await dbDelete('skyid_users', req.login);
+  await dbDelete('chat_users', req.login);
+  const tokens = await dbList('tokens');
+  for (const token of tokens) {
+    const data = await dbGet('tokens', token);
+    if (data && data.login === req.login) {
+      await dbDelete('tokens', token);
+      tokenCache.del(token);
+    }
+  }
+  userCache.del(req.login);
+  if (skyidIndex) skyidIndex.delete(user.skyid);
+  res.json({ ok: true });
+});
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
