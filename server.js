@@ -592,7 +592,7 @@ app.get('/posts', verifyToken, async (req, res) => {
 app.post('/posts', verifyToken, async (req, res) => {
   const { text } = req.body;
   if (!text) return res.status(400).json({ error: 'Text required' });
-  const post = { id: 'post_' + Date.now(), skyid: req.skyid, author: req.login, text, created: Date.now(), likes: [], dislikes: [], comments: [] };
+  const post = { id: 'post_' + Date.now(), skyid: req.skyid, author: user.name || user.login, text, created: Date.now(), likes: [], dislikes: [], comments: [] };
   await dbPut('social_posts', post.id, post);
   res.json(post);
 });
@@ -629,7 +629,7 @@ app.post('/posts/:id/comments', verifyToken, async (req, res) => {
   if (!text) return res.status(400).json({ error: 'Text required' });
   const post = await dbGet('social_posts', req.params.id);
   if (!post) return res.status(404).json({ error: 'Not found' });
-  const comment = { id: 'comment_' + Date.now(), skyid: req.skyid, author: req.login, text, created: Date.now(), likes: [], dislikes: [] };
+  const comment = { id: 'comment_' + Date.now(), skyid: req.skyid, author: user.name || user.login, text, created: Date.now(), likes: [], dislikes: [] };
   post.comments.push(comment);
   await dbPut('social_posts', req.params.id, post);
   res.json(comment);
