@@ -900,17 +900,25 @@ wss.on('connection', (ws, req) => {
         case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
         case 'search_user': {
           console.log('🔍 search_user вызван, query:', msg.query);
-          const allUsers = await dbList('skyid_users');
-          console.log('📋 Все пользователи:', allUsers);
           const query = (msg.query || '').toLowerCase().trim();
-          const filtered = allUsers.filter(u => {
+  
+  // Получаем из обеих БД
+          const skyidUsers = await dbList('skyid_users');
+          const chatUsers = await dbList('chat_users');
+  
+  // Объединяем и удаляем дубли
+          const allUsers = [...new Set([...skyidUsers, ...chatUsers])];
+          console.log('📋 Все пользователи:', allUsers);
+  
+        const filtered = allUsers.filter(login => {
             if (!query) return true;
-            return u !== currentUser && u.toLowerCase().includes(query);
+            return login !== currentUser && login.toLowerCase().includes(query);
           });
-          console.log('✅ Отфильтровано:', filtered);
+        console.log('✅ Отфильтровано:', filtered);
+  
           ws.send(JSON.stringify({
             type: 'user_search_result',
-            users: filtered.map(u => ({ login: u }))
+            users: filtered.map(login => ({ login }))
           }));
           break;
         }
