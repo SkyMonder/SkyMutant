@@ -875,13 +875,37 @@ wss.on('connection', (ws, req) => {
     try { msg = JSON.parse(raw); } catch (e) { return; }
     console.log('📩 WebSocket сообщение от', currentUser || 'неавторизован', ':', msg.type);
     if (msg.type === 'auth') {
-      const user = await dbGet('chat_users', msg.login);
-      if (!user) return ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
-      currentUser = msg.login;
+      const token = msg.token;
+      if (!token) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Token required' }));
+        return;
+      }
+      // Проверяем токен через существующую функцию
+      const tokenData = await getTokenData(token);
+      if (!tokenData || tokenData.expires < Date.now()) {
+         ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired token' }));
+        return;
+      }
+      // Получаем пользователя из skyid_users
+      const user = await getCachedUser(tokenData.login);
+      if (!user) {
+        ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
+        return;
+      }
+      currentUser = user.login;
       connections[currentUser] = ws;
-      user.status = 'online';
-      await dbPut('chat_users', msg.login, user);
-      ws.send(JSON.stringify({ type: 'auth_ok', ...user, login: msg.login }));
+      // Обновляем статус в chat_users (если есть)
+      const chatUser = await dbGet('chat_users', currentUser);
+      if (chatUser) {
+        chatUser.status = 'online';
+        await dbPut('chat_users', currentUser, chatUser);
+      }
+      ws.send(JSON.stringify({
+        type: 'auth_ok',
+        ...chatUser,
+        login: currentUser,
+        skyid: user.skyid
+      }));
       await sendChatList(currentUser);
       return;
     }
