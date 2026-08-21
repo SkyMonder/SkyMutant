@@ -873,6 +873,7 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch (e) { return; }
+    console.log('📩 WebSocket сообщение от', currentUser || 'неавторизован', ':', msg.type);
     if (msg.type === 'auth') {
       const user = await dbGet('chat_users', msg.login);
       if (!user) return ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
@@ -898,18 +899,18 @@ wss.on('connection', (ws, req) => {
         case 'edit_message': await handleEditMessage(currentUser, msg.chatId, msg.messageId, msg.newText); break;
         case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
         case 'search_user': {
-          // Ищем пользователей в skyid_users (основная таблица)
-        const allUsers = await dbList('skyid_users');
-        // Фильтруем по запросу, исключая текущего пользователя
-        const query = (msg.query || '').toLowerCase().trim();
-        const filtered = allUsers.filter(u => {
-          if (!query) return true;
-          return u !== currentUser && u.toLowerCase().includes(query);
-        });
-  // Отправляем результат (возвращаем логины)
-        ws.send(JSON.stringify({
-          type: 'user_search_result',
-          users: filtered.map(u => ({ login: u }))
+          console.log('🔍 search_user вызван, query:', msg.query);
+          const allUsers = await dbList('skyid_users');
+          console.log('📋 Все пользователи:', allUsers);
+          const query = (msg.query || '').toLowerCase().trim();
+          const filtered = allUsers.filter(u => {
+            if (!query) return true;
+            return u !== currentUser && u.toLowerCase().includes(query);
+          });
+          console.log('✅ Отфильтровано:', filtered);
+          ws.send(JSON.stringify({
+            type: 'user_search_result',
+            users: filtered.map(u => ({ login: u }))
           }));
           break;
         }
