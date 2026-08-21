@@ -592,7 +592,21 @@ app.get('/posts', verifyToken, async (req, res) => {
 app.post('/posts', verifyToken, async (req, res) => {
   const { text } = req.body;
   if (!text) return res.status(400).json({ error: 'Text required' });
-  const post = { id: 'post_' + Date.now(), skyid: req.skyid, author: user.name || user.login, text, created: Date.now(), likes: [], dislikes: [], comments: [] };
+
+  // Получаем пользователя из кеша по логину
+  const user = await getCachedUser(req.login);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const post = {
+    id: 'post_' + Date.now(),
+    skyid: req.skyid,
+    author: user.name || user.login,
+    text,
+    created: Date.now(),
+    likes: [],
+    dislikes: [],
+    comments: []
+  };
   await dbPut('social_posts', post.id, post);
   res.json(post);
 });
