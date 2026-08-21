@@ -898,7 +898,7 @@ wss.on('connection', (ws, req) => {
         case 'edit_message': await handleEditMessage(currentUser, msg.chatId, msg.messageId, msg.newText); break;
         case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
         case 'search_user': {
-          const all = (await dbList('chat_users')).filter(u => u !== currentUser && u.toLowerCase().includes((msg.query || '').toLowerCase()));
+          const all = (await dbList('skyid_users')).filter(u => u !== currentUser && u.toLowerCase().includes((msg.query || '').toLowerCase()));
           ws.send(JSON.stringify({ type: 'user_search_result', users: all.map(u => ({ login: u })) }));
           break;
         }
