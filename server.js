@@ -898,8 +898,19 @@ wss.on('connection', (ws, req) => {
         case 'edit_message': await handleEditMessage(currentUser, msg.chatId, msg.messageId, msg.newText); break;
         case 'delete_message': await handleDeleteMessage(currentUser, msg.chatId, msg.messageId); break;
         case 'search_user': {
-          const all = (await dbList('skyid_users')).filter(u => u !== currentUser && u.toLowerCase().includes((msg.query || '').toLowerCase()));
-          ws.send(JSON.stringify({ type: 'user_search_result', users: all.map(u => ({ login: u })) }));
+          // Ищем пользователей в skyid_users (основная таблица)
+        const allUsers = await dbList('skyid_users');
+        // Фильтруем по запросу, исключая текущего пользователя
+        const query = (msg.query || '').toLowerCase().trim();
+        const filtered = allUsers.filter(u => {
+          if (!query) return true;
+          return u !== currentUser && u.toLowerCase().includes(query);
+        });
+  // Отправляем результат (возвращаем логины)
+        ws.send(JSON.stringify({
+          type: 'user_search_result',
+          users: filtered.map(u => ({ login: u }))
+          }));
           break;
         }
                 // ====== ИГРЫ (SKYGAMES) ======
