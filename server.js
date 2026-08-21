@@ -31,10 +31,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// ====== СТАТИКА (для остальных файлов, если понадобится) ======
+// ====== СТАТИКА ======
 app.use(express.static('public'));
 
-// ====== ЯВНЫЙ МАРШРУТ ДЛЯ ban.html (из корня) ======
+// ====== ЯВНЫЙ МАРШРУТ ДЛЯ ban.html ======
 app.get('/ban.html', (req, res) => {
   res.sendFile(path.join(__dirname, 'ban.html'));
 });
@@ -67,22 +67,16 @@ async function saveBannedIps(data) {
   await fs.writeFile(BANNED_IPS_FILE, JSON.stringify(data, null, 2));
 }
 
-// ====== MIDDLEWARE: ГЛОБАЛЬНАЯ ПРОВЕРКА БАНА (ВСЕ РЕДИРЕКТ НА /ban.html) ======
+// ====== MIDDLEWARE: ГЛОБАЛЬНАЯ ПРОВЕРКА БАНА ======
 app.use(async (req, res, next) => {
-  // Пропускаем запросы к ban.html и favicon.ico
   if (req.path === '/ban.html' || req.path === '/favicon.ico') {
     return next();
   }
-
   const ip = getClientIP(req);
   const banned = await loadBannedIps();
-  const banData = banned[ip];
-
-  if (banData) {
-    // РЕДИРЕКТ НА ban.html ДЛЯ ЛЮБОГО ЗАПРОСА (включая API, статику, корень)
+  if (banned[ip]) {
     return res.redirect('/ban.html');
   }
-
   next();
 });
 
@@ -592,11 +586,8 @@ app.get('/posts', verifyToken, async (req, res) => {
 app.post('/posts', verifyToken, async (req, res) => {
   const { text } = req.body;
   if (!text) return res.status(400).json({ error: 'Text required' });
-
-  // Получаем пользователя из кеша по логину
   const user = await getCachedUser(req.login);
   if (!user) return res.status(404).json({ error: 'User not found' });
-
   const post = {
     id: 'post_' + Date.now(),
     skyid: req.skyid,
@@ -643,6 +634,8 @@ app.post('/posts/:id/comments', verifyToken, async (req, res) => {
   if (!text) return res.status(400).json({ error: 'Text required' });
   const post = await dbGet('social_posts', req.params.id);
   if (!post) return res.status(404).json({ error: 'Not found' });
+  const user = await getCachedUser(req.login);
+  if (!user) return res.status(404).json({ error: 'User not found' });
   const comment = { id: 'comment_' + Date.now(), skyid: req.skyid, author: user.name || user.login, text, created: Date.now(), likes: [], dislikes: [] };
   post.comments.push(comment);
   await dbPut('social_posts', req.params.id, post);
@@ -664,15 +657,12 @@ app.post('/admin/ban', verifyToken, adminRequired, async (req, res) => {
   await dbPut('social_bans', skyid, { skyid, bannedAt: Date.now() });
   res.json({ ok: true });
 });
-// ====== РАЗБАН ПОЛЬЗОВАТЕЛЯ (по skyid) ======
 app.post('/admin/unban-user', verifyToken, adminRequired, async (req, res) => {
   const { skyid } = req.body;
   if (!skyid) return res.status(400).json({ error: 'skyid required' });
   await dbDelete('social_bans', skyid);
   res.json({ ok: true });
 });
-
-// ====== РАЗБАН IP ======
 app.post('/admin/unban-ip', isAdmin, async (req, res) => {
   const { ip } = req.body;
   if (!ip) return res.status(400).json({ error: 'IP required' });
@@ -682,8 +672,6 @@ app.post('/admin/unban-ip', isAdmin, async (req, res) => {
   await saveBannedIps(banned);
   res.json({ ok: true });
 });
-
-// ========== Поиск (заглушка) ==========
 app.post('/api/search', async (req, res) => {
   res.json({ data: await encryptClientResponse({ query: '', results: [] }) });
 });
@@ -791,7 +779,6 @@ app.post('/report_violation', async (req, res) => {
     id: Date.now() + '_' + Math.random().toString(36).slice(2,6)
   });
   await dbPut('violations', cleanIp, violations);
-
   if (violations.count >= MAX_VIOLATIONS) {
     const lastReport = violations.reports[violations.reports.length - 1];
     const banned = await loadBannedIps();
@@ -874,19 +861,19 @@ wss.on('connection', (ws, req) => {
     let msg;
     try { msg = JSON.parse(raw); } catch (e) { return; }
     console.log('📩 WebSocket сообщение от', currentUser || 'неавторизован', ':', msg.type);
+
+    // ---- НОВАЯ АВТОРИЗАЦИЯ ПО ТОКЕНУ ----
     if (msg.type === 'auth') {
       const token = msg.token;
       if (!token) {
         ws.send(JSON.stringify({ type: 'error', message: 'Token required' }));
         return;
       }
-      // Проверяем токен через существующую функцию
       const tokenData = await getTokenData(token);
       if (!tokenData || tokenData.expires < Date.now()) {
-         ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired token' }));
+        ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired token' }));
         return;
       }
-      // Получаем пользователя из skyid_users
       const user = await getCachedUser(tokenData.login);
       if (!user) {
         ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
@@ -894,7 +881,6 @@ wss.on('connection', (ws, req) => {
       }
       currentUser = user.login;
       connections[currentUser] = ws;
-      // Обновляем статус в chat_users (если есть)
       const chatUser = await dbGet('chat_users', currentUser);
       if (chatUser) {
         chatUser.status = 'online';
@@ -909,7 +895,30 @@ wss.on('connection', (ws, req) => {
       await sendChatList(currentUser);
       return;
     }
+
+    // ---- АВТОРИЗАЦИЯ ПО ЛОГИНУ (LEGACY) ----
+    if (msg.type === 'auth_legacy') {
+      const login = msg.login;
+      if (!login) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Login required' }));
+        return;
+      }
+      const user = await dbGet('chat_users', login);
+      if (!user) {
+        ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
+        return;
+      }
+      currentUser = login;
+      connections[currentUser] = ws;
+      user.status = 'online';
+      await dbPut('chat_users', login, user);
+      ws.send(JSON.stringify({ type: 'auth_ok', ...user, login }));
+      await sendChatList(currentUser);
+      return;
+    }
+
     if (!currentUser) return;
+
     try {
       switch (msg.type) {
         case 'get_chats': await sendChatList(currentUser); break;
@@ -925,28 +934,22 @@ wss.on('connection', (ws, req) => {
         case 'search_user': {
           console.log('🔍 search_user вызван, query:', msg.query);
           const query = (msg.query || '').toLowerCase().trim();
-  
-  // Получаем из обеих БД
           const skyidUsers = await dbList('skyid_users');
           const chatUsers = await dbList('chat_users');
-  
-  // Объединяем и удаляем дубли
           const allUsers = [...new Set([...skyidUsers, ...chatUsers])];
           console.log('📋 Все пользователи:', allUsers);
-  
-        const filtered = allUsers.filter(login => {
+          const filtered = allUsers.filter(login => {
             if (!query) return true;
             return login !== currentUser && login.toLowerCase().includes(query);
           });
-        console.log('✅ Отфильтровано:', filtered);
-  
+          console.log('✅ Отфильтровано:', filtered);
           ws.send(JSON.stringify({
             type: 'user_search_result',
             users: filtered.map(login => ({ login }))
           }));
           break;
         }
-                // ====== ИГРЫ (SKYGAMES) ======
+        // -------- ИГРЫ (SKYGAMES) --------
         case 'games_auth': {
           const { token: gamesToken, username: gamesUsername } = msg;
           const decodedGames = verifyJWT(gamesToken);
@@ -958,7 +961,6 @@ wss.on('connection', (ws, req) => {
           }
           break;
         }
-
         case 'games_list_rooms': {
           const roomList = Object.keys(gameRooms).map(id => {
             const r = gameRooms[id];
@@ -972,16 +974,13 @@ wss.on('connection', (ws, req) => {
           ws.send(JSON.stringify({ type: 'games_room_list', rooms: roomList }));
           break;
         }
-
         case 'games_create_room': {
           const gameType = msg.gameType;
           const playerInfo = gamePlayers[ws];
           if (!playerInfo) return ws.send(JSON.stringify({ type: 'games_error', message: 'Not authorized' }));
           if (playerInfo.roomId) return ws.send(JSON.stringify({ type: 'games_error', message: 'Already in room' }));
-
           if (!gameQueues[gameType]) gameQueues[gameType] = [];
           gameQueues[gameType].push(ws);
-
           let opponent = null;
           for (let i = 0; i < gameQueues[gameType].length; i++) {
             const candidate = gameQueues[gameType][i];
@@ -991,7 +990,6 @@ wss.on('connection', (ws, req) => {
               break;
             }
           }
-
           if (opponent) {
             const roomId = 'game_' + Date.now();
             const initialState = getInitialGameState(gameType);
@@ -1008,7 +1006,6 @@ wss.on('connection', (ws, req) => {
             };
             gamePlayers[ws].roomId = roomId;
             gamePlayers[opponent].roomId = roomId;
-
             ws.send(JSON.stringify({
               type: 'games_room_created',
               roomId: roomId,
@@ -1029,7 +1026,6 @@ wss.on('connection', (ws, req) => {
           }
           break;
         }
-
         case 'games_join_room': {
           const roomIdToJoin = msg.roomId;
           const joiner = gamePlayers[ws];
@@ -1038,7 +1034,6 @@ wss.on('connection', (ws, req) => {
           const room = gameRooms[roomIdToJoin];
           if (!room) return ws.send(JSON.stringify({ type: 'games_error', message: 'Room not found' }));
           if (Object.keys(room.players).length >= 2) return ws.send(JSON.stringify({ type: 'games_error', message: 'Room full' }));
-
           room.players[joiner.username] = ws;
           joiner.roomId = roomIdToJoin;
           ws.send(JSON.stringify({
@@ -1051,17 +1046,14 @@ wss.on('connection', (ws, req) => {
           broadcastGameState(roomIdToJoin);
           break;
         }
-
         case 'games_move': {
           const roomIdMove = msg.roomId;
           const moveRoom = gameRooms[roomIdMove];
           if (!moveRoom) return;
           if (moveRoom.gameOver) return;
           if (moveRoom.turn !== gamePlayers[ws].username) return ws.send(JSON.stringify({ type: 'games_error', message: 'Not your turn' }));
-
           const newState = processMove(moveRoom.gameType, moveRoom.state, msg.move, gamePlayers[ws].username);
           if (!newState) return ws.send(JSON.stringify({ type: 'games_error', message: 'Invalid move' }));
-
           moveRoom.state = newState;
           const gameResult = checkGameOver(moveRoom.gameType, moveRoom.state);
           if (gameResult) {
@@ -1076,7 +1068,6 @@ wss.on('connection', (ws, req) => {
             }, 10000);
             return;
           }
-
           const players = Object.keys(moveRoom.players);
           const currentPlayer = moveRoom.turn;
           const nextPlayer = players[0] === currentPlayer ? players[1] : players[0];
@@ -1084,7 +1075,6 @@ wss.on('connection', (ws, req) => {
           broadcastGameState(roomIdMove);
           break;
         }
-
         case 'games_leave_room': {
           const leaveRoomId = msg.roomId;
           const leaver = gamePlayers[ws];
@@ -1104,7 +1094,6 @@ wss.on('connection', (ws, req) => {
           leaver.roomId = null;
           break;
         }
-
         case 'games_chat': {
           const chatRoomId = msg.roomId;
           const chatRoom = gameRooms[chatRoomId];
@@ -1119,7 +1108,6 @@ wss.on('connection', (ws, req) => {
           });
           break;
         }
-
         case 'games_resign': {
           const resignRoomId = msg.roomId;
           const resigner = gamePlayers[ws];
@@ -1137,7 +1125,6 @@ wss.on('connection', (ws, req) => {
           }, 2000);
           break;
         }
-
         case 'games_new_round': {
           const newRoundRoomId = msg.roomId;
           const newRoundRoom = gameRooms[newRoundRoomId];
@@ -1165,8 +1152,12 @@ wss.on('connection', (ws, req) => {
           await forwardSignaling(msg, currentUser); break;
         default: ws.send(JSON.stringify({ type: 'error', message: 'Unknown type' }));
       }
-    } catch (e) { ws.send(JSON.stringify({ type: 'error', message: 'Server error' })); }
+    } catch (e) {
+      console.error('WebSocket error:', e);
+      ws.send(JSON.stringify({ type: 'error', message: 'Server error' }));
+    }
   });
+
   ws.on('close', () => {
     if (currentUser) {
       delete connections[currentUser];
@@ -1411,15 +1402,11 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-
-// ====== ПУБЛИЧНАЯ СТАТИСТИКА (для всех) ======
+// ====== ПУБЛИЧНАЯ СТАТИСТИКА ======
 app.get('/api/stats/public', async (req, res) => {
   try {
-    // Подсчёт пользователей
     const users = await dbList('skyid_users');
     const totalUsers = users.length;
-
-    // Подсчёт сообщений (из всех чатов)
     const chatIds = await dbList('chats');
     let totalMessages = 0;
     for (const id of chatIds) {
@@ -1428,37 +1415,23 @@ app.get('/api/stats/public', async (req, res) => {
         totalMessages += chat.messages.length;
       }
     }
-
-    // Подсчёт видео (если есть папка videos в SkyMutant, иначе 0)
     let totalVideos = 0;
     try {
       const videoIds = await dbList('videos');
       totalVideos = videoIds.length;
-    } catch (e) {
-      // Если папки нет — просто игнорируем
-    }
-
-    // Загружаем аналитику из файла analytics.json
+    } catch (e) {}
     const ANALYTICS_FILE = path.join(DATA_DIR, 'analytics.json');
     let analytics = { pages: {}, devices: {}, countries: {}, hourly: {} };
     try {
       const content = await fs.readFile(ANALYTICS_FILE, 'utf-8');
       analytics = JSON.parse(content);
-    } catch (e) {
-      // Если файла нет — используем пустую аналитику
-    }
-
-    const today = new Date().toISOString().split('T')[0];
-
-    // Собираем данные за последние 30 дней
+    } catch (e) {}
     const last30Days = [];
     for (let i = 0; i < 30; i++) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       last30Days.push(d.toISOString().split('T')[0]);
     }
-
-    // Общее число визитов за 30 дней
     let totalVisits = 0;
     const dailyActivity = [];
     for (const day of last30Days) {
@@ -1467,8 +1440,6 @@ app.get('/api/stats/public', async (req, res) => {
       totalVisits += visits;
       dailyActivity.push({ date: day, visits });
     }
-
-    // Устройства (агрегировано)
     const devices = {};
     for (const day of last30Days) {
       const dayDevices = analytics.devices[day] || {};
@@ -1477,8 +1448,6 @@ app.get('/api/stats/public', async (req, res) => {
       }
     }
     const deviceList = Object.entries(devices).map(([type, count]) => ({ type, count }));
-
-    // Страны (топ-5)
     const countries = {};
     for (const day of last30Days) {
       const dayCountries = analytics.countries[day] || {};
@@ -1490,8 +1459,6 @@ app.get('/api/stats/public', async (req, res) => {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
       .map(([country, count]) => ({ country, count }));
-
-    // Пиковые часы (топ-3)
     const hourly = {};
     for (const day of last30Days) {
       const dayHourly = analytics.hourly[day] || {};
@@ -1503,14 +1470,12 @@ app.get('/api/stats/public', async (req, res) => {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
       .map(([hour, count]) => ({ hour: parseInt(hour), count }));
-
-    // Отправляем ответ
     res.json({
       totalUsers,
       totalMessages,
       totalVideos,
       totalVisits,
-      dailyActivity: dailyActivity.reverse(), // чтобы шли в хронологическом порядке
+      dailyActivity: dailyActivity.reverse(),
       devices: deviceList,
       topCountries,
       peakHours,
@@ -1521,10 +1486,9 @@ app.get('/api/stats/public', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// ====== АНОНИМНАЯ АНАЛИТИКА (приём данных) ======
-const ANALYTICS_FILE = path.join(DATA_DIR, 'analytics.json');
 
-// Инициализация файла, если его нет
+// ====== АНОНИМНАЯ АНАЛИТИКА ======
+const ANALYTICS_FILE = path.join(DATA_DIR, 'analytics.json');
 (async function initAnalytics() {
   try {
     await fs.access(ANALYTICS_FILE);
@@ -1539,37 +1503,26 @@ app.post('/api/analytics', async (req, res) => {
   if (!page) {
     return res.status(400).json({ error: 'Page is required' });
   }
-
   try {
     let analytics = { pages: {}, devices: {}, countries: {}, hourly: {} };
     try {
       const content = await fs.readFile(ANALYTICS_FILE, 'utf-8');
       analytics = JSON.parse(content);
     } catch (e) {}
-
     const today = new Date().toISOString().split('T')[0];
     const hour = new Date().getHours();
-
-    // pages
     if (!analytics.pages[today]) analytics.pages[today] = {};
     analytics.pages[today][page] = (analytics.pages[today][page] || 0) + 1;
-
-    // devices
     if (deviceType) {
       if (!analytics.devices[today]) analytics.devices[today] = {};
       analytics.devices[today][deviceType] = (analytics.devices[today][deviceType] || 0) + 1;
     }
-
-    // countries
     if (country) {
       if (!analytics.countries[today]) analytics.countries[today] = {};
       analytics.countries[today][country] = (analytics.countries[today][country] || 0) + 1;
     }
-
-    // hourly
     if (!analytics.hourly[today]) analytics.hourly[today] = {};
     analytics.hourly[today][hour] = (analytics.hourly[today][hour] || 0) + 1;
-
     await fs.writeFile(ANALYTICS_FILE, JSON.stringify(analytics, null, 2));
     res.json({ ok: true });
   } catch (err) {
@@ -1577,14 +1530,14 @@ app.post('/api/analytics', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// ====== ВЕРИФИКАЦИЯ ДЛЯ ИГР (GET) ======
+
+// ====== ВЕРИФИКАЦИЯ ДЛЯ ИГР ======
 app.get('/gaverify', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace('Bearer ', '');
   if (!token) {
     return res.status(400).json({ error: 'Token required' });
   }
-
   const decoded = verifyJWT(token);
   if (decoded) {
     const user = await getUserBySkyid(decoded.skyid);
@@ -1592,7 +1545,6 @@ app.get('/gaverify', async (req, res) => {
       return res.json({ skyid: decoded.skyid, login: decoded.login });
     }
   }
-
   const tokenData = await getTokenData(token);
   if (!tokenData) {
     return res.status(401).json({ error: 'Invalid token' });
@@ -1607,10 +1559,10 @@ app.get('/gaverify', async (req, res) => {
   }
   res.json({ skyid: user.skyid, login: user.login });
 });
+
 // =============================================
 // ПРОСТЫЕ ЭНДПОИНТЫ ДЛЯ МЕССЕНДЖЕРА (JSON)
 // =============================================
-
 app.post('/smreg', async (req, res) => {
   const { login, password } = req.body;
   if (!login || !password) {
@@ -1665,14 +1617,11 @@ app.post('/smlog', async (req, res) => {
   await saveToken(newToken, login, 7*24*3600);
   res.json({ ok: true, skyid: user.skyid, token: newToken, jwt: jwtToken });
 });
-// ====== УПРАВЛЕНИЕ АККАУНТОМ ======
 
-// Middleware для проверки токена (async!)
+// ====== УПРАВЛЕНИЕ АККАУНТОМ ======
 async function verifyAuth(req, res, next) {
   const auth = req.headers.authorization?.replace('Bearer ', '');
   if (!auth) return res.status(401).json({ error: 'Unauthorized' });
-  
-  // Проверяем JWT
   const decoded = verifyJWT(auth);
   if (decoded) {
     const user = await getUserBySkyid(decoded.skyid);
@@ -1682,8 +1631,6 @@ async function verifyAuth(req, res, next) {
       return next();
     }
   }
-  
-  // Проверяем токен из БД
   const tokenData = await getTokenData(auth);
   if (!tokenData || tokenData.expires < Date.now()) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -1795,4 +1742,6 @@ app.delete('/account/delete', verifyAuth, async (req, res) => {
   if (skyidIndex) skyidIndex.delete(user.skyid);
   res.json({ ok: true });
 });
+
+// ====== ЗАПУСК ======
 server.listen(PORT, () => console.log(`SkyMutant running on port ${PORT}`));
