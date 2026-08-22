@@ -340,6 +340,8 @@ app.post('/verify', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace('Bearer ', '') || req.body.token;
   if (!token) return res.status(400).json({ error: 'Token required' });
+
+  // 1. Проверяем JWT
   const decoded = verifyJWT(token);
   if (decoded) {
     const user = await getUserBySkyid(decoded.skyid);
@@ -347,16 +349,22 @@ app.post('/verify', async (req, res) => {
       return res.json({ skyid: decoded.skyid, login: decoded.login });
     }
   }
-  const decoded = verifyJWT(token);
-    if (!decoded) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired token' }));
-      return;
-    }
-    const user = await getUserBySkyid(decoded.skyid);
-    if (!user) {
-      ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
-      return;
-    }
+
+  // 2. Если JWT невалиден, проверяем токен из БД (старая схема)
+  const tokenData = await getTokenData(token);
+  if (!tokenData) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+  if (tokenData.expires < Date.now()) {
+    await deleteToken(token);
+    return res.status(401).json({ error: 'Token expired' });
+  }
+  const user = await getCachedUser(tokenData.login);
+  if (!user) {
+    return res.status(401).json({ error: 'User not found' });
+  }
+  res.json({ skyid: user.skyid, login: user.login });
+});
 
 // ========== Чат-регистрация ==========
 app.post('/chat/register', async (req, res) => {
