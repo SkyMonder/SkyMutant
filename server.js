@@ -867,16 +867,23 @@ wss.on('connection', (ws, req) => {
     // ---- НОВАЯ АВТОРИЗАЦИЯ ПО ТОКЕНУ ----
     if (msg.type === 'auth') {
       const token = msg.token;
-      if (!token) {
+        if (!token) {
         ws.send(JSON.stringify({ type: 'error', message: 'Token required' }));
         return;
       }
-      const tokenData = await getTokenData(token);
-      if (!tokenData || tokenData.expires < Date.now()) {
+
+      // Проверяем JWT напрямую (без getTokenData)
+      let decoded;
+      try {
+        decoded = verifyJWT(token); // без const!
+      } catch (e) {
+        decoded = null;
+      }
+      if (!decoded) {
         ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired token' }));
         return;
       }
-      const user = await getCachedUser(tokenData.login);
+      const user = await getUserBySkyid(decoded.skyid);
       if (!user) {
         ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
         return;
