@@ -244,11 +244,13 @@ async function saveToken(token, login, expiresInSeconds = 7*24*3600) {
 }
 
 async function getTokenData(token) {
+  console.log('🔍 Поиск токена:', token);
   let data = tokenCache.get(token);
   if (!data) {
     data = await dbGet('tokens', token);
     if (data) tokenCache.set(token, data);
   }
+  console.log('📦 Результат:', data);
   return data;
 }
 
@@ -1616,6 +1618,8 @@ app.post('/smlog', async (req, res) => {
   userCache.set(login, user);
   await saveToken(newToken, login, 7*24*3600);
   res.json({ ok: true, skyid: user.skyid, token: newToken, jwt: jwtToken });
+  await saveToken(newToken, login, 7*24*3600);
+  console.log('✅ Токен сохранён:', newToken);
 });
 
 // ====== УПРАВЛЕНИЕ АККАУНТОМ ======
