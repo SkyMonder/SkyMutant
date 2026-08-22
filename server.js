@@ -347,16 +347,16 @@ app.post('/verify', async (req, res) => {
       return res.json({ skyid: decoded.skyid, login: decoded.login });
     }
   }
-  const tokenData = await getTokenData(token);
-  if (!tokenData) return res.status(401).json({ error: 'Invalid token' });
-  if (tokenData.expires < Date.now()) {
-    await deleteToken(token);
-    return res.status(401).json({ error: 'Token expired' });
-  }
-  const user = await getCachedUser(tokenData.login);
-  if (!user) return res.status(401).json({ error: 'User not found' });
-  res.json({ skyid: user.skyid, login: user.login });
-});
+  const decoded = verifyJWT(token);
+    if (!decoded) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired token' }));
+      return;
+    }
+    const user = await getUserBySkyid(decoded.skyid);
+    if (!user) {
+      ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
+      return;
+    }
 
 // ========== Чат-регистрация ==========
 app.post('/chat/register', async (req, res) => {
